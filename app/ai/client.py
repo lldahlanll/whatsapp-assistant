@@ -1,6 +1,7 @@
 import httpx
 import asyncio
 import os
+import time
 from typing import Optional
 from loguru import logger
 
@@ -11,6 +12,10 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 MAX_RETRIES = 3         # Maksimal retry per request
 RETRY_DELAY = 2.0       # Detik antara retry (exponential backoff)
 REQUEST_TIMEOUT =  60.0 # Timeout per request (detik)
+
+# [BARU] Setup Circuit Breaker
+DISABLED_MODELS = {}      # Format: {"model_id": timestamp_saat_mati}
+DISABLE_DURATION = 3600   # Disable selama 1 jam (dalam detik)
 
 class OpenRouterClient:
     """
@@ -53,18 +58,17 @@ class OpenRouterClient:
         messages: list[dict],
         max_tokens: int = 1024,
     ) -> Optional[str]:
-        """
-        Kirim request chat ke OpenRouter.
 
-        Args:
-            model_id  : ID model OpenRouter (contoh: "openai/gpt-oss-120b:free")
-            messages  : List pesan dalam format OpenAI chat
-                        [{"role": "user", "content": "..."}]
-            max_tokens: Batas token output
-
-        Returns:
-            String respons dari model, atau None jika semua retry gagal.
-        """
+        if model_id in DISABLED_MODELS:
+            waktu_berlalu = time.time() - DISABLED_MODELS[model_id]
+            if waktu_berlalu < DISABLE_DURATION:
+                logger.warning(f"[CircuitBreaker] ⏭️ Skip {model_id} (Masih di-disable. Sisa: {int(DISABLE_DURATION - waktu_berlalu)}s)")
+                return None
+            else:
+                # Waktu hukuman sudah habis, coba bebaskan model
+                logger.info(f"[CircuitBreaker] 🔄 Mencoba kembali model {model_id}")
+                del DISABLED_MODELS[model_id]
+        # ───────────────────────────────────────────────────
         payload = {
             "model": model_id,
             "messages": messages,
@@ -75,10 +79,11 @@ class OpenRouterClient:
             try:
                 client = await self._get_client()
 
-                logger.debug(
-                    f"[OpenRouter] Attempt {attempt}/{MAX_RETRIES} | "
-                    f"Model: {model_id} | Messages: {len(messages)}"
-                )
+
+                # logger.debug(
+                #     f"[OpenRouter] Attempt {attempt}/{MAX_RETRIES} | "
+                #     f"Model: {model_id} | Messages: {len(messages)}"
+                # )
 
                 response = await client.post("/chat/completions", json=payload)
 
@@ -101,6 +106,11 @@ class OpenRouterClient:
                     if response.status_code >= 500:
                         await asyncio.sleep(RETRY_DELAY * attempt)
                         continue
+
+                    if response.status_code in [401, 403, 404]:
+                        logger.error(f"[CircuitBreaker] 🔴 Model {model_id} mati (HTTP {response.status_code}). Di-disable selama 1 jam!")
+                        DISABLED_MODELS[model_id] = time.time()
+                        return None
 
                     # Error 4xx lain (auth, bad request) — jangan retry
                     return None
@@ -151,7 +161,7 @@ class OpenRouterClient:
         logger.error(
             f"[OpenRouter] All {MAX_RETRIES} attempts failed | Model: {model_id}"
         )
-        return None
+        return Noner
 
 
 # ── Singleton instance ─────────────────────────────────────────

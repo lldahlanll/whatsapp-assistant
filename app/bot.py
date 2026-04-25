@@ -2,6 +2,7 @@ import asyncio
 import os
 import traceback
 import time
+import re
 from loguru import logger
 
 from neonize.aioze.client import NewAClient
@@ -17,6 +18,7 @@ from app.utils.logger import setup_logger
 from app.utils.stats import stats_tracker
 from neonize.utils.enum import ChatPresence, ChatPresenceMedia
 from neonize.proto.Neonize_pb2 import JID
+from neonize.utils import build_jid
 
 setup_logger()
 
@@ -85,12 +87,19 @@ class WhatsAppBot:
             # Ekstrak JID — User@Server
             sender_jid = f"{source.Sender.User}@{source.Sender.Server}"
             chat_jid   = f"{source.Chat.User}@{source.Chat.Server}"
+            memory_jid = chat_jid
 
             logger.info(
                 f"[Bot] {'GROUP' if is_group else 'PRIVATE'} | "
                 f"From: {sender_jid} | "
                 f"Text: {text[:60]}{'...' if len(text) > 60 else ''}"
             )
+
+            # ── Pengecekan SPAM (Rate Limit) ─────────────
+            is_spam = await memory_manager.is_rate_limited(sender_jid, limti=3, window_seconds=10)
+            if is_spam:
+                logger.warning(f"[Bot] ⚠️ SPAM TERDETEKSI dari {sender_jid}. Pesan diabaikan.")
+                return # Langsung stop eksekusi, abaikan pesan ini
 
             await stats_tracker.track_message_received(chat_jid, is_group)
             # Filter grup — hanya balas kalau di-mention atau di-reply
@@ -109,7 +118,8 @@ class WhatsAppBot:
             if text.startswith("/"):
                 response = await self._handle_command(text, memory_jid)
                 if response:
-                    await self._send_reply(client, event, response)
+                    formatted_response = self.format_for_whatsapp(response)
+                    await self._send_reply(client, event, formatted_response)
                     return
 
             # ── Generate AI response ──────────────────────────────
@@ -117,7 +127,7 @@ class WhatsAppBot:
             messages = await memory_manager.get_history(memory_jid)
 
             # Mulai typing indicator
-            await self._send_typing(client, memory_jid, True)
+            await self._send_typing(client, source.Chat, True)
 
             logger.info("[Bot] Generating response...")
             t_start = time.monotonic()
@@ -125,7 +135,7 @@ class WhatsAppBot:
             t_elapsed = (time.monotonic() - t_start) * 1000
 
             # Stop typing indicator
-            await self._send_typing(client, memory_jid, False)
+            await self._send_typing(client, source.Chat, False)
 
             if response:
                 # [TRACK] Response Sukses
@@ -133,7 +143,8 @@ class WhatsAppBot:
                 await memory_manager.add_message(memory_jid, "assistant", response)
                 
                 logger.info(f"[Bot] ✓ {model_used} replied ({len(response)} chars, {t_elapsed:.0f}ms)")
-                await self._send_reply(client, event, response)
+                formatted_response = self.format_for_whatsapp(response)
+                await self._send_reply(client, event, formatted_response)
             else:
                 # [TRACK] Response Gagal
                 await stats_tracker.track_response("none", False, t_elapsed)
@@ -184,6 +195,15 @@ class WhatsAppBot:
                     return True
 
         return False
+
+    def format_for_whatsapp(self, text: str) -> str:
+        # Ubah **teks** menjadi *teks*
+        text = re.sub(r'\*\*(.*?)\*\*', r'*\1*', text)
+        # Ubah header ### Header menjadi *Header*
+        text = re.sub(r'#{1,6}\s*(.*)', r'*\1*', text)
+        # Ubah link [text](url) menjadi text (url)
+        text = re.sub(r'\[(.*?)\]\((.*?)\)', r'\1 (\2)', text)
+        return text
 
     # ── Helper: Handle Command ────────────────────────────────
 
@@ -237,20 +257,15 @@ class WhatsAppBot:
             logger.error(f"[Bot] Failed to send reply: {e}")
 
     # ── Send: Typing ────────────────────────────────────
-    async def _send_typing(self, client: NewAClient, chat_jid: str, is_typing: bool):
+    async def _send_typing(self, client: NewAClient, chat_jid: JID, is_typing: bool): # <-- Ganti tipe data jadi JID
         """
         Kirim typing indicator ke chat.
-        
-        is_typing=True  → tampilkan "sedang mengetik..."
-        is_typing=False → hentikan typing indicator
         """
+        status_text = "START TYPING" if is_typing else "STOP TYPING"
+        
         try:
-            # Bangun JID object dari string "user@server"
-            parts  = chat_jid.split("@")
-            jid    = JID()
-            jid.User   = parts[0]
-            jid.Server = parts[1]
-
+            logger.info(f"[Bot] Mencoba mengirim status {status_text}")
+                
             state = (
                 ChatPresence.CHAT_PRESENCE_COMPOSING   # typing...
                 if is_typing else
@@ -258,13 +273,16 @@ class WhatsAppBot:
             )
 
             await client.send_chat_presence(
-                jid,
+                chat_jid,  # <-- Langsung gunakan objek JID utuh
                 state,
                 ChatPresenceMedia.CHAT_PRESENCE_MEDIA_TEXT,
             )
+            
+            logger.info(f"[Bot] ✓ Berhasil mengirim status {status_text}")
+
         except Exception as e:
-            # Typing indicator gagal tidak boleh crash bot
-            logger.debug(f"[Bot] Typing indicator error: {e}")
+            logger.error(f"[Bot] ✗ GAGAL mengirim typing indicator: {e}")
+            logger.error(f"[Bot] Traceback Error Typing:\n{traceback.format_exc()}")
 
     # ── Start ─────────────────────────────────────────────────
 

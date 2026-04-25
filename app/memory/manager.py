@@ -254,5 +254,34 @@ class MemoryManager:
             return False
 
 
+    # ── Proteksi Spam (Rate Limiter) ──────────────────────────
+
+    async def is_rate_limited(self, jid: str, limit: int = 3, window_seconds: int = 10) -> bool:
+        """
+        Cek apakah user mengirim pesan melebihi batas.
+        Menggunakan sistem fixed-window counter di Redis.
+        """
+        try:
+            r = await self._get_redis()
+            key = f"ratelimit:{jid}"
+
+            # Tambah counter (INCR mengembalikan nilai setelah ditambah)
+            current = await r.incr(key)
+
+            # Jika ini pesan pertama, set waktu kedaluwarsa (window_seconds)
+            if current == 1:
+                await r.expire(key, window_seconds)
+
+            # Jika jumlah pesan melampaui limit, berarti SPAM
+            if current > limit:
+                return True
+                
+            return False
+            
+        except Exception as e:
+            logger.error(f"[RateLimit] Gagal mengecek limit untuk {jid}: {e}")
+            return False # Jika redis error, biarkan lolos saja agar bot tidak mati
+
+
 # ── Singleton instance ─────────────────────────────────────────
 memory_manager = MemoryManager()
