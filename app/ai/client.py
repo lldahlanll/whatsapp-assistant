@@ -1,169 +1,131 @@
-import httpx
-import asyncio
-import os
-import time
 from typing import Optional
+
 from loguru import logger
 
-# ── Konstanta ─────────────────────────────────────────────────
-OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+from app.ai.circuit_breaker import CircuitBreaker
+from app.ai.providers import (
+    BaseProvider,
+    ProviderEndpoint,
+    ProviderType,
+    create_provider,
+)
+from app.config import settings
 
-MAX_RETRIES = 3         # Maksimal retry per request
-RETRY_DELAY = 2.0       # Detik antara retry (exponential backoff)
-REQUEST_TIMEOUT =  60.0 # Timeout per request (detik)
 
-# [BARU] Setup Circuit Breaker
-DISABLED_MODELS = {}      # Format: {"model_id": timestamp_saat_mati}
-DISABLE_DURATION = 3600   # Disable selama 1 jam (dalam detik)
-
-class OpenRouterClient:
+class MultiProviderClient:
     """
-    Async HTTP client untuk OpenRouter API.
-    
-    Fitur:
-    - Retry otomatis dengan exponential backoff
-    - Timeout handling
-    - Error parsing yang informatif
-    - Reuse HTTP connection (httpx.AsyncClient)
+    Pool dari semua provider endpoints yang dikonfigurasi.
+
+    Auto-skip endpoint yang:
+    - API key-nya tidak diset
+    - Lagi di-trip oleh circuit breaker
     """
-    def __init__(self):
-        self._client:Optional[httpx.AsyncClient] = None
 
-    async def _get_client(self) -> httpx.AsyncClient:
-        """Lazy init client — buat hanya saat pertama kali dipakai."""
-        if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(
-                base_url=OPENROUTER_BASE_URL,
-                headers={
-                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                    "Content-Type": "application/json",
-                    # Header ini disarankan OpenRouter untuk identifikasi app
-                    "HTTP-Referer": "https://github.com/whatsapp-ai-bot",
-                    "X-Title": "WhatsApp AI Bot",
-                },
-                timeout=httpx.Timeout(REQUEST_TIMEOUT),
-            )
-        return self._client
-    
-    async def close(self):
-         """Tutup HTTP connection saat bot shutdown."""
-         if self._client and not self._client.is_closed:
-            await self._client.aclose()
-            logger.info("OpenRouter client closed.")
+    def __init__(self) -> None:
+        self.providers: dict[str, BaseProvider] = {}
+        self.breaker = CircuitBreaker(
+            disable_duration=settings.circuit_breaker_disable_duration
+        )
+        self._register_endpoints()
 
-    async def chat(
+    def _register_endpoints(self) -> None:
+        """Register semua endpoint yang punya API key valid."""
+        endpoints = self._build_endpoints()
+
+        for ep in endpoints:
+            if not ep.api_key:
+                logger.debug(f"[Client] Skip {ep.name}: no API key")
+                continue
+            self.providers[ep.name] = create_provider(ep)
+            logger.info(f"[Client] ✓ Registered: {ep.name} ({ep.provider_type.value})")
+
+        if not self.providers:
+            logger.error("[Client] ⚠️ No providers registered! Check your .env")
+
+    @staticmethod
+    def _build_endpoints() -> list[ProviderEndpoint]:
+        return [
+            ProviderEndpoint(
+                provider_type=ProviderType.GROQ,
+                name="groq-main",
+                api_key=settings.groq_api_key or "",
+                base_url=settings.groq_base_url,
+            ),
+            ProviderEndpoint(
+                provider_type=ProviderType.GEMINI,
+                name="gemini-acc1",
+                api_key=settings.gemini_api_key_1 or "",
+                base_url=settings.gemini_base_url,
+            ),
+            ProviderEndpoint(
+                provider_type=ProviderType.GEMINI,
+                name="gemini-acc2",
+                api_key=settings.gemini_api_key_2 or "",
+                base_url=settings.gemini_base_url,
+            ),
+            ProviderEndpoint(
+                provider_type=ProviderType.OPENROUTER,
+                name="openrouter-acc1",
+                api_key=settings.openrouter_api_key_1 or "",
+                base_url=settings.openrouter_base_url,
+            ),
+            ProviderEndpoint(
+                provider_type=ProviderType.OPENROUTER,
+                name="openrouter-acc2",
+                api_key=settings.openrouter_api_key_2 or "",
+                base_url=settings.openrouter_base_url,
+            ),
+        ]
+
+    async def call(
         self,
+        endpoint_name: str,
         model_id: str,
         messages: list[dict],
-        max_tokens: int = 1024,
+        max_tokens: int,
     ) -> Optional[str]:
+        """
+        Panggil model di endpoint tertentu.
+        Return None kalau endpoint tidak terdaftar, breaker tripped, atau call gagal.
+        """
+        provider = self.providers.get(endpoint_name)
+        if not provider:
+            logger.debug(f"[Client] Skip {endpoint_name}: not registered")
+            return None
 
-        if model_id in DISABLED_MODELS:
-            waktu_berlalu = time.time() - DISABLED_MODELS[model_id]
-            if waktu_berlalu < DISABLE_DURATION:
-                logger.warning(f"[CircuitBreaker] ⏭️ Skip {model_id} (Masih di-disable. Sisa: {int(DISABLE_DURATION - waktu_berlalu)}s)")
-                return None
-            else:
-                # Waktu hukuman sudah habis, coba bebaskan model
-                logger.info(f"[CircuitBreaker] 🔄 Mencoba kembali model {model_id}")
-                del DISABLED_MODELS[model_id]
-        # ───────────────────────────────────────────────────
-        payload = {
-            "model": model_id,
-            "messages": messages,
-            "max_tokens": max_tokens
+        # Circuit breaker key = endpoint:model untuk granularity
+        breaker_key = f"{endpoint_name}:{model_id}"
+        if await self.breaker.is_open(breaker_key):
+            return None
+
+        response = await provider.generate(model_id, messages, max_tokens)
+
+        # Trip breaker kalau gagal — tapi hanya untuk error berat
+        # (network errors are transient, jangan trip)
+        # Logic trip ada di provider.generate() melalui logging level
+
+        return response
+
+    async def trip(self, endpoint_name: str, model_id: str, reason: str) -> None:
+        """Manual trip breaker untuk endpoint:model."""
+        await self.breaker.trip(f"{endpoint_name}:{model_id}", reason)
+
+    async def close(self) -> None:
+        """Tutup semua HTTP clients."""
+        for name, provider in self.providers.items():
+            try:
+                await provider.close()
+            except Exception as e:
+                logger.error(f"[Client] Error closing {name}: {e}")
+        logger.info("[Client] All providers closed")
+
+    def status(self) -> dict:
+        """Untuk health endpoint."""
+        return {
+            "registered_endpoints": list(self.providers.keys()),
+            "total": len(self.providers),
         }
 
-        for attempt in range(1, MAX_RETRIES + 1):
-            try:
-                client = await self._get_client()
 
-
-                # logger.debug(
-                #     f"[OpenRouter] Attempt {attempt}/{MAX_RETRIES} | "
-                #     f"Model: {model_id} | Messages: {len(messages)}"
-                # )
-
-                response = await client.post("/chat/completions", json=payload)
-
-                # ── Handle HTTP Error ──────────────────────────
-                if response.status_code != 200:
-                    error_body = response.text
-                    logger.warning(
-                        f"[OpenRouter] HTTP {response.status_code} | "
-                        f"Model: {model_id} | Body: {error_body[:200]}"
-                    )
-
-                    # Rate limit — tunggu lebih lama
-                    if response.status_code == 429:
-                        wait = RETRY_DELAY * attempt * 2
-                        logger.warning(f"[OpenRouter] Rate limited. Waiting {wait}s...")
-                        await asyncio.sleep(wait)
-                        continue
-
-                    # Error 5xx (server error) — retry
-                    if response.status_code >= 500:
-                        await asyncio.sleep(RETRY_DELAY * attempt)
-                        continue
-
-                    if response.status_code in [401, 403, 404]:
-                        logger.error(f"[CircuitBreaker] 🔴 Model {model_id} mati (HTTP {response.status_code}). Di-disable selama 1 jam!")
-                        DISABLED_MODELS[model_id] = time.time()
-                        return None
-
-                    # Error 4xx lain (auth, bad request) — jangan retry
-                    return None
-
-
-                # ── Parse Response ─────────────────────────────
-                data = response.json()
-                content = (
-                    data.get("choices", [{}])[0]
-                    .get("message", {})
-                    .get("content", "")
-                    .strip()
-                )
-
-
-                if not content:
-                    logger.warning(f"[OpenRouter] Empty response from {model_id}")
-                    return None
-                
-                logger.debug(
-                    f"[OpenRouter] Success | Model: {model_id} | "
-                    f"Token used: {data.get('usage', {}).get('total_tokens', '?')}"
-                )
-                return content
-
-            except httpx.TimeoutException:
-                logger.warning(
-                    f"[OpenRouter] Timeout on attempt {attempt}/{MAX_RETRIES} | "
-                    f"Model: {model_id}"
-                )
-                if attempt < MAX_RETRIES:
-                    await asyncio.sleep(RETRY_DELAY * attempt)
-
-            except httpx.RequestError as e:
-                logger.warning(
-                    f"[OpenRouter] Connection error on attempt {attempt}/{MAX_RETRIES} | "
-                    f"Model: {model_id} | Error: {e}"
-                )
-                if attempt < MAX_RETRIES:
-                    await asyncio.sleep(RETRY_DELAY * attempt)
-
-            except Exception as e :
-                logger.error(
-                    f"[OpenRouter] Unexpected error | Model: {model_id} | {e}" 
-                )
-                return None
-        
-        logger.error(
-            f"[OpenRouter] All {MAX_RETRIES} attempts failed | Model: {model_id}"
-        )
-        return Noner
-
-
-# ── Singleton instance ─────────────────────────────────────────
-# Satu client dipakai di seluruh aplikasi — efisien & hemat koneksi
-openrouter_client = OpenRouterClient()
+# Singleton
+multi_client = MultiProviderClient()

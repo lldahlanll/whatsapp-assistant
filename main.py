@@ -1,60 +1,84 @@
+# main.py
 import asyncio
 import signal
 import sys
-from loguru import logger
+
 from dotenv import load_dotenv
 
+# Load .env SEBELUM import modul yang baca config
 load_dotenv()
 
-from app.bot import WhatsAppBot
-from app.ai.client import openrouter_client
-from app.memory.manager import memory_manager
-from app.utils.logger import setup_logger
-from app.utils.stats import stats_tracker
+from app.ai.client import multi_client  # noqa: E402
+from app.bot import WhatsAppBot  # noqa: E402
+from app.memory.manager import memory_manager  # noqa: E402
+from app.utils.health import HealthServer  # noqa: E402
+from app.utils.logger import setup_logger  # noqa: E402
+from app.utils.stats import stats_tracker  # noqa: E402
+from loguru import logger  # noqa: E402
 
 setup_logger()
 
 
-async def main():
+async def main() -> None:
     logger.info("[Main] ══════════════════════════════════")
     logger.info("[Main]      WhatsApp AI Bot Starting     ")
-    logger.info("[Main]   Neonize 0.3.x + Python 3.12    ")
+    logger.info("[Main]   Neonize 0.3.x + Python 3.12     ")
     logger.info("[Main] ══════════════════════════════════")
 
     bot = WhatsAppBot()
-
-    # Import health server di sini supaya bot_ref bisa dipass
-    from app.utils.health import HealthServer
     health = HealthServer(bot_ref=bot)
+    stop_event = asyncio.Event()
 
-    async def shutdown():
-        logger.info("[Main] Shutting down gracefully...")
-        await openrouter_client.close()
-        await memory_manager.close()
-        await stats_tracker.close()
-        logger.info("[Main] All connections closed. Goodbye!")
-        sys.exit(0)
-
-    # Handle Ctrl+C
+    # Signal handlers
     loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(
-            sig,
-            lambda: asyncio.create_task(shutdown())
-        )
 
-    # Jalankan health server & bot bersamaan
-    asyncio.create_task(health.start())
-    # await asyncio.gather(
-    #     await bot.start(),
-    #     bot.start(),
-    # )
-    try:
-        await bot.start()
-    except Exception as e:
-        logger.critical(f"[Main] Bot failed to start: {e}")
-    
+    def _request_shutdown() -> None:
+        if not stop_event.is_set():
+            logger.info("[Main] Signal received, initiating shutdown...")
+            stop_event.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, _request_shutdown)
+        except NotImplementedError:
+            # Windows fallback
+            signal.signal(sig, lambda *_: _request_shutdown())
+
+    # Start services
+    health_task = asyncio.create_task(health.start(), name="health")
+    bot_task = asyncio.create_task(bot.start(), name="bot")
+
+    # Tunggu sampai shutdown signal ATAU bot crash
+    done, pending = await asyncio.wait(
+        [bot_task, asyncio.create_task(stop_event.wait())],
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+
+    # Kalau bot_task selesai duluan (crash), log error
+    if bot_task in done:
+        try:
+            bot_task.result()
+        except Exception as e:
+            logger.critical(f"[Main] Bot crashed: {e}")
+
+    # Cleanup
+    logger.info("[Main] Cleaning up...")
+    for task in pending:
+        task.cancel()
+    health_task.cancel()
+
+    await asyncio.gather(
+        multi_client.close(),
+        memory_manager.close(),
+        stats_tracker.close(),
+        return_exceptions=True,
+    )
+
+    logger.info("[Main] Goodbye!")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        sys.exit(0)

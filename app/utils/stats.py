@@ -1,152 +1,149 @@
-import json
-import time
-import os
-from loguru import logger
+from datetime import datetime
 from typing import Optional
 
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+import redis.asyncio as aioredis
+from loguru import logger
+
+from app.config import settings
+
 
 class StatsTracker:
-    """
-    Track usage statistik bot — disimpan di Redis.
-    
-    Metrics yang ditrack:
-    - Total pesan masuk
-    - Total response berhasil / gagal
-    - Usage per model (berapa kali dipanggil)
-    - Average response time per model
-    - Active users (unique JID)
-    """
+    """Daily metrics tracker via Redis. Semua key punya TTL eksplisit."""
 
-    def __init__(self):
-        self._redis = None
+    def __init__(self) -> None:
+        self._redis: Optional[aioredis.Redis] = None
+        self._ttl = settings.stats_ttl_seconds
 
-    async def _get_redis(self):
+    async def _get_redis(self) -> aioredis.Redis:
         if self._redis is None:
-            import redis.asyncio as aioredis
             self._redis = await aioredis.from_url(
-                f"redis://{REDIS_HOST}:{REDIS_PORT}/0",
+                settings.redis_url,
                 encoding="utf-8",
                 decode_responses=True,
             )
         return self._redis
 
-    # ── Key builders ──────────────────────────────────────────
+    async def close(self) -> None:
+        if self._redis:
+            await self._redis.aclose()
 
-    def _today(self) -> str:
-        from datetime import datetime
+    @staticmethod
+    def _today() -> str:
         return datetime.now().strftime("%Y-%m-%d")
 
-    def _key(self, metric: str) -> str:
-        return f"stats:{self._today()}:{metric}"
+    def _key(self, metric: str, date: Optional[str] = None) -> str:
+        return f"stats:{date or self._today()}:{metric}"
 
-    # ── Track metrics ─────────────────────────────────────────
+    # ── Track ─────────────────────────────────────────────────
 
-    async def track_message_received(self, jid: str, is_group: bool):
-        """Catat pesan masuk."""
+    async def track_message_received(self, jid: str, is_group: bool) -> None:
         try:
             r = await self._get_redis()
             pipe = r.pipeline()
+
+            keys_to_expire = [
+                self._key("messages_received"),
+                self._key("groups" if is_group else "private"),
+                self._key("active_users"),
+            ]
+
             pipe.incr(self._key("messages_received"))
             pipe.incr(self._key("groups" if is_group else "private"))
-            pipe.sadd(self._key("active_users"), jid)   # unique users
-            pipe.expire(self._key("messages_received"), 7 * 86400)
-            pipe.expire(self._key("active_users"), 7 * 86400)
+            pipe.sadd(self._key("active_users"), jid)
+
+            for k in keys_to_expire:
+                pipe.expire(k, self._ttl)
+
             await pipe.execute()
         except Exception as e:
-            logger.error(f"[Stats] track_message_received error: {e}")
+            logger.error(f"[Stats] track_message_received | {e}")
 
     async def track_response(
         self,
         model_name: str,
         success: bool,
         response_time_ms: float,
-    ):
-        """Catat response dari AI model."""
+    ) -> None:
         try:
             r = await self._get_redis()
             pipe = r.pipeline()
 
             if success:
-                pipe.incr(self._key("responses_success"))
-                pipe.incr(self._key(f"model:{model_name}"))
-                # Simpan response time untuk rata-rata
-                pipe.lpush(self._key(f"rt:{model_name}"), response_time_ms)
-                pipe.ltrim(self._key(f"rt:{model_name}"), 0, 99)  # max 100 data
-            else:
-                pipe.incr(self._key("responses_failed"))
+                k_model = self._key(f"model:{model_name}")
+                k_rt = self._key(f"rt:{model_name}")
+                k_ok = self._key("responses_success")
 
-            pipe.expire(self._key("responses_success"), 7 * 86400)
-            pipe.expire(self._key("responses_failed"), 7 * 86400)
+                pipe.incr(k_ok)
+                pipe.incr(k_model)
+                pipe.lpush(k_rt, response_time_ms)
+                pipe.ltrim(k_rt, 0, 99)
+
+                for k in (k_ok, k_model, k_rt):
+                    pipe.expire(k, self._ttl)
+            else:
+                k_fail = self._key("responses_failed")
+                pipe.incr(k_fail)
+                pipe.expire(k_fail, self._ttl)
+
             await pipe.execute()
         except Exception as e:
-            logger.error(f"[Stats] track_response error: {e}")
+            logger.error(f"[Stats] track_response | {e}")
 
-    async def track_command(self, command: str):
-        """Catat penggunaan command."""
+    async def track_command(self, command: str) -> None:
         try:
             r = await self._get_redis()
-            await r.incr(self._key(f"cmd:{command}"))
+            key = self._key(f"cmd:{command}")
+            pipe = r.pipeline()
+            pipe.incr(key)
+            pipe.expire(key, self._ttl)
+            await pipe.execute()
         except Exception as e:
-            logger.error(f"[Stats] track_command error: {e}")
+            logger.error(f"[Stats] track_command | {e}")
 
-    # ── Get summary ───────────────────────────────────────────
+    # ── Read ──────────────────────────────────────────────────
 
     async def get_daily_summary(self, date: Optional[str] = None) -> dict:
-        """Ambil ringkasan statistik harian."""
         try:
             r = await self._get_redis()
             d = date or self._today()
             prefix = f"stats:{d}"
 
-            # Ambil semua metrics
-            received  = await r.get(f"{prefix}:messages_received") or "0"
-            success   = await r.get(f"{prefix}:responses_success") or "0"
-            failed    = await r.get(f"{prefix}:responses_failed") or "0"
-            private   = await r.get(f"{prefix}:private") or "0"
-            groups    = await r.get(f"{prefix}:groups") or "0"
-            users     = await r.scard(f"{prefix}:active_users") or 0
+            received = int(await r.get(f"{prefix}:messages_received") or 0)
+            success = int(await r.get(f"{prefix}:responses_success") or 0)
+            failed = int(await r.get(f"{prefix}:responses_failed") or 0)
+            private = int(await r.get(f"{prefix}:private") or 0)
+            groups = int(await r.get(f"{prefix}:groups") or 0)
+            users = int(await r.scard(f"{prefix}:active_users") or 0)
 
-            # Model usage
-            from app.ai.models import MODELS, ModelTier
+            from app.ai.models import MODELS
+
             model_usage = {}
-            for tier, model in MODELS.items():
-                count = await r.get(f"{prefix}:model:{model.name}") or "0"
-                
-                # Average response time
+            for model in MODELS.values():
+                count = int(await r.get(f"{prefix}:model:{model.name}") or 0)
                 rt_list = await r.lrange(f"{prefix}:rt:{model.name}", 0, -1)
-                if rt_list:
-                    avg_rt = sum(float(x) for x in rt_list) / len(rt_list)
-                else:
-                    avg_rt = 0
-
+                avg_rt = (
+                    sum(float(x) for x in rt_list) / len(rt_list)
+                    if rt_list else 0.0
+                )
                 model_usage[model.name] = {
-                    "count": int(count),
+                    "count": count,
                     "avg_response_time_ms": round(avg_rt, 1),
                 }
 
             return {
                 "date": d,
-                "messages_received": int(received),
-                "responses_success": int(success),
-                "responses_failed": int(failed),
-                "private_messages": int(private),
-                "group_messages": int(groups),
-                "active_users": int(users),
-                "success_rate": (
-                    round(int(success) / max(int(received), 1) * 100, 1)
-                ),
+                "messages_received": received,
+                "responses_success": success,
+                "responses_failed": failed,
+                "private_messages": private,
+                "group_messages": groups,
+                "active_users": users,
+                "success_rate": round(success / max(received, 1) * 100, 1),
                 "model_usage": model_usage,
             }
         except Exception as e:
-            logger.error(f"[Stats] get_daily_summary error: {e}")
+            logger.error(f"[Stats] get_daily_summary | {e}")
             return {}
 
-    async def close(self):
-        if self._redis:
-            await self._redis.aclose()
 
-
-# Singleton
 stats_tracker = StatsTracker()

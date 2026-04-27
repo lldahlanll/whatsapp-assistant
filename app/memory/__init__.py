@@ -1,3 +1,4 @@
-from app.memory.manager import memory_manager, SYSTEM_PROMPT
+# app/memory/__init__.py
+from app.memory.manager import memory_manager
 
-__all__ = ["memory_manager", "SYSTEM_PROMPT"]
+__all__ = ["memory_manager"]

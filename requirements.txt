@@ -1,25 +1,20 @@
 # WhatsApp
 neonize==0.3.16.post0
 
-# HTTP Client untuk OpenRouter
+# HTTP & async
 httpx>=0.28.1
+aiohttp==3.9.5
 
-# Environment variables
+# Config & validation
 python-dotenv==1.0.1
-
-# Redis untuk memory/history
-redis==5.0.4
-
-# Async support
-asyncio-mqtt==0.16.2
-
-# Logging yang lebih bagus
-loguru==0.7.2
-
-# Data validation
 pydantic==2.7.1
 pydantic-settings==2.3.4
-aiohttp==3.9.5
+
+# Storage
+redis==5.0.4
+
+# Logging
+loguru==0.7.2
 
 
 

@@ -1,130 +1,121 @@
+# app/ai/router.py
 import re
+from typing import Optional
+
 from loguru import logger
-from app.ai.client import openrouter_client
-from app.ai.models import ModelTier, get_model, get_fallback_chain
 
-# ── Classifier Rules ──────────────────────────────────────────
-#
-# Sistem klasifikasi berbasis rule (cepat, tidak butuh API call tambahan).
-# Urutan pengecekan: TIER_3 dulu (paling ketat), baru TIER_1 (paling longgar).
-#
+from app.ai.client import multi_client
+from app.ai.models import ModelTier, get_fallback_routes
+from app.ai.prompts import ChatContext, build_system_prompt
 
-# Kata kunci teknikal → Tier 3
+# ── Keywords (sama seperti sebelumnya) ────────────────────────
 TIER3_KEYWORDS = [
-    # Programming
     "code", "kode", "program", "debug", "error", "function", "class",
     "algorithm", "algoritma", "database", "query", "sql", "api",
     "docker", "server", "deploy", "python", "javascript", "json",
-    # Analisis kompleks
     "analisis", "analysis", "explain", "jelaskan", "bandingkan",
-    "compare", "perbedaan", "difference", "bagaimana cara", "how to",
-    "implementasi", "implement", "arsitektur", "architecture",
-    # Penulisan panjang
-    "essay", "artikel", "laporan", "report", "summary", "rangkuman",
-    "translate", "terjemahkan", "revisi", "review",
+    "compare", "perbedaan", "difference", "implementasi", "implement",
+    "arsitektur", "architecture", "essay", "artikel", "laporan",
+    "report", "summary", "rangkuman", "translate", "terjemahkan",
+    "revisi", "review",
 ]
 
-# Indikator pesan panjang/kompleks → Tier 2
 TIER2_KEYWORDS = [
-    "kenapa", "mengapa", "why", "apa itu", "what is", "cerita",
-    "story", "tolong bantu", "please help", "bisa jelaskan",
-    "rekomendasikan", "recommend", "saran", "advice", "pendapat",
-    "opinion", "pikir", "think", "rencana", "plan",
+    "kenapa", "mengapa", "why", "cerita", "story", "rekomendasikan",
+    "recommend", "saran", "advice", "pendapat", "opinion", "rencana",
+    "plan",
 ]
+
+_TIER3_PATTERN = re.compile(
+    r"\b(" + "|".join(re.escape(k) for k in TIER3_KEYWORDS) + r")\b",
+    re.IGNORECASE,
+)
+_TIER2_PATTERN = re.compile(
+    r"\b(" + "|".join(re.escape(k) for k in TIER2_KEYWORDS) + r")\b",
+    re.IGNORECASE,
+)
+
 
 def classify_message(text: str) -> ModelTier:
-    """
-    Klasifikasi pesan ke ModelTier berdasarkan konten & panjang.
+    text_clean = text.strip()
+    char_count = len(text_clean)
 
-    Logika:
-    1. Pesan panjang (>200 karakter) → minimal Tier 2
-    2. Ada keyword teknikal → Tier 3
-    3. Ada keyword medium → Tier 2
-    4. Default → Tier 1
-
-    Args:
-        text: Teks pesan dari user
-
-    Returns:
-        ModelTier yang sesuai
-    """
-    text_lower = text.lower().strip()
-    char_count = len(text_lower)
-    word_count = len(text_lower.split())
-
-    logger.debug(
-        f"[Classier] Input: {char_count} chars, {word_count} words | "
-        f"Preview: {text[:80]}..."
-    )
-
-    # ── Rule 1: Keyword Tier 3 (teknikal/kompleks) ────────────
-    for keyword in TIER3_KEYWORDS:
-        if keyword in text_lower:
-            logger.info(f"[Classifier] -> TIER_3 (keyword: '{keyword}')")
-            return ModelTier.TIER_3
-
-    # ── Rule 2: Pesan sangat panjang (>500 char) → Tier 3 ────
-    if char_count > 500:
-        logger.info(f"[Classifier] -> TIER_3 (very long: {char_count} chars)")
+    if match := _TIER3_PATTERN.search(text_clean):
+        logger.info(f"[Classifier] → TIER_3 (keyword: '{match.group(1)}')")
         return ModelTier.TIER_3
-    
-    # ── Rule 3: Keyword Tier 2 ────────────────────────────────
-    for keyword in TIER2_KEYWORDS:
-        if keyword in text_lower:
-            logger.info(f"[Classfier] -> TIER_2 (keyword: '{keyword}')")
-            return ModelTier.TIER_2
 
-    # ── Rule 4: Pesan medium (>200 char) → Tier 2 ────────────
-    if char_count > 200:
-        logger.info(f"[Classfier] -> TIER_2 (mediun length: {char_count} chars)")
+    if char_count > 500:
+        logger.info(f"[Classifier] → TIER_3 (long: {char_count} chars)")
+        return ModelTier.TIER_3
+
+    if match := _TIER2_PATTERN.search(text_clean):
+        logger.info(f"[Classifier] → TIER_2 (keyword: '{match.group(1)}')")
         return ModelTier.TIER_2
 
-    # ── Default: Tier 1 ───────────────────────────────────────
-    logger.info(f"[Classfier] -> TIER_1 (default, short message)")
+    if char_count > 200:
+        logger.info(f"[Classifier] → TIER_2 (medium: {char_count} chars)")
+        return ModelTier.TIER_2
+
+    logger.info(f"[Classifier] → TIER_1 (short: {char_count} chars)")
     return ModelTier.TIER_1
 
 
 async def route_and_generate(
-    messages: list[dict],
+    history: list[dict],
     user_text: str,
+    context: Optional[ChatContext] = None,
 ) -> tuple[str, str]:
     """
-    Classify pesan → pilih model → generate response dengan fallback.
+    Classify → build prompt → fallback chain via multi-provider.
 
     Args:
-        messages  : Full conversation history dalam format OpenAI chat
-        user_text : Teks pesan terbaru dari user (untuk classifier)
+        history: User-assistant history dari memory (TANPA system prompt)
+        user_text: Pesan user terbaru (untuk classifier)
+        context: ChatContext untuk inject info kontekstual
 
     Returns:
-        Tuple (response_text, model_name_used)
-        response_text = "" jika semua model gagal
+        (response_text, route_name). response="" kalau semua gagal.
     """
     # 1. Classify
     tier = classify_message(user_text)
-    fallback_chain = get_fallback_chain(tier)
+
+    # 2. Build layered system prompt
+    system_prompt = build_system_prompt(tier=tier, context=context)
+
+    # 3. Assemble final messages: system + history
+    messages = [{"role": "system", "content": system_prompt}] + history
+
+    # 4. Get fallback routes
+    routes = get_fallback_routes(tier)
+    if not routes:
+        logger.error("[Router] No routes available for tier")
+        return "", "none"
 
     logger.info(
-        f"[Router] Starting chain: "
-        f"{'->'.join(m.name for m in fallback_chain)}"
+        f"[Router] Tier {tier.name} | {len(routes)} routes | "
+        f"prompt: {len(system_prompt)} chars | "
+        f"history: {len(history)} msgs"
     )
 
-    # 2. Coba setiap model dalam chain
-    for model in fallback_chain:
-        logger.info(f"[Router] Trying: {model.name} ({model.model_id})")
+    # 5. Try fallback chain
+    for i, route in enumerate(routes, 1):
+        logger.info(
+            f"[Router] [{i}/{len(routes)}] Trying {route.name} "
+            f"({route.endpoint_name}/{route.model_id})"
+        )
 
-        response = await openrouter_client.chat(
-            model_id=model.model_id,
+        response = await multi_client.call(
+            endpoint_name=route.endpoint_name,
+            model_id=route.model_id,
             messages=messages,
-            max_tokens=model.max_tokens,
+            max_tokens=route.max_tokens,
         )
 
         if response:
-            logger.info(f"[Router] ✓ Success with: {model.name}")
-            return response, model.name
-        
-        logger.warning(f"[Router] ✗ Failed: {model.name}, trying next...")
+            logger.info(f"[Router] ✓ Success: {route.name}")
+            return response, route.name
 
+        logger.warning(f"[Router] ✗ Failed: {route.name}")
 
-    # 3. Semua model gagal
-    logger.error("[Router] All models in fallback chain failed!")
+    logger.error(f"[Router] ALL {len(routes)} routes failed!")
     return "", "none"
