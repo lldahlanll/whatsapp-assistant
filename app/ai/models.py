@@ -1,7 +1,11 @@
 # app/ai/models.py
 """
 Model routing — multi-provider, free-tier only.
-Updated dengan 5 OpenRouter models tambahan.
+
+Perubahan v1.1:
+- TIER_3: Reorder routes — Groq & Gemini Flash naik priority,
+  Gemini Pro turun (quota 25 req/hari sangat terbatas)
+- Nemotron tetap ada sebagai fallback terakhir
 """
 from dataclasses import dataclass, field
 from enum import Enum
@@ -35,7 +39,6 @@ class TierConfig:
 # TIER 1: Pesan pendek/casual (latency priority)
 # ──────────────────────────────────────────────────────────────
 TIER_1_ROUTES = [
-    # PRIMARY: Groq Llama 3.1 8B — paling cepat
     ModelRoute(
         name="Groq Llama 3.1 8B",
         provider_type=ProviderType.GROQ,
@@ -43,7 +46,6 @@ TIER_1_ROUTES = [
         model_id="llama-3.1-8b-instant",
         max_tokens=1024,
     ),
-    # FALLBACK: Groq Llama 4 Scout 17B MoE
     ModelRoute(
         name="Groq Llama 4 Scout 17B",
         provider_type=ProviderType.GROQ,
@@ -51,7 +53,6 @@ TIER_1_ROUTES = [
         model_id="meta-llama/llama-4-scout-17b-16e-instruct",
         max_tokens=1024,
     ),
-    # FALLBACK: Gemini Flash-Lite ×2
     ModelRoute(
         name="Gemini 2.5 Flash-Lite (acc1)",
         provider_type=ProviderType.GEMINI,
@@ -66,7 +67,6 @@ TIER_1_ROUTES = [
         model_id="gemini-2.5-flash-lite",
         max_tokens=1024,
     ),
-    # LAST RESORT: OpenRouter Gemma 4 (kecil & cepat)
     ModelRoute(
         name="OpenRouter Gemma 4 26B (acc1)",
         provider_type=ProviderType.OPENROUTER,
@@ -81,7 +81,6 @@ TIER_1_ROUTES = [
 # TIER 2: Reasoning medium (balance quality & speed)
 # ──────────────────────────────────────────────────────────────
 TIER_2_ROUTES = [
-    # PRIMARY: Gemini 2.5 Flash ×2
     ModelRoute(
         name="Gemini 2.5 Flash (acc1)",
         provider_type=ProviderType.GEMINI,
@@ -96,7 +95,6 @@ TIER_2_ROUTES = [
         model_id="gemini-2.5-flash",
         max_tokens=2048,
     ),
-    # FALLBACK: Groq models (cepat & strong)
     ModelRoute(
         name="Groq Llama 3.3 70B",
         provider_type=ProviderType.GROQ,
@@ -118,7 +116,6 @@ TIER_2_ROUTES = [
         model_id="openai/gpt-oss-120b",
         max_tokens=2048,
     ),
-    # OpenRouter: MiniMax M2.5 (versatile, modern)
     ModelRoute(
         name="OpenRouter MiniMax M2.5 (acc1)",
         provider_type=ProviderType.OPENROUTER,
@@ -133,7 +130,6 @@ TIER_2_ROUTES = [
         model_id="minimax/minimax-m2.5:free",
         max_tokens=2048,
     ),
-    # OpenRouter: Gemma 4 sebagai extra fallback
     ModelRoute(
         name="OpenRouter Gemma 4 26B (acc2)",
         provider_type=ProviderType.OPENROUTER,
@@ -141,7 +137,6 @@ TIER_2_ROUTES = [
         model_id="google/gemma-4-26b-a4b-it:free",
         max_tokens=2048,
     ),
-    # LAST RESORT: GPT-OSS via OpenRouter
     ModelRoute(
         name="OpenRouter GPT-OSS 120B (acc1)",
         provider_type=ProviderType.OPENROUTER,
@@ -154,55 +149,15 @@ TIER_2_ROUTES = [
 
 # ──────────────────────────────────────────────────────────────
 # TIER 3: Tugas kompleks/teknikal (quality priority)
+#
+# ⚠️  REORDER v1.1:
+#   Groq 70B/Qwen3 naik ke PRIMARY — cepat & reliable
+#   Gemini Flash naik ke secondary — quota lebih longgar dari Pro
+#   Gemini Pro turun ke LAST RESORT — quota hanya 25 req/hari!
+#   Nemotron tetap sebagai deep fallback
 # ──────────────────────────────────────────────────────────────
 TIER_3_ROUTES = [
-    # PRIMARY: Gemini 2.5 Pro ×2 — best reasoning
-    ModelRoute(
-        name="Gemini 2.5 Pro (acc1)",
-        provider_type=ProviderType.GEMINI,
-        endpoint_name="gemini-acc1",
-        model_id="gemini-2.5-pro",
-        max_tokens=4096,
-    ),
-    ModelRoute(
-        name="Gemini 2.5 Pro (acc2)",
-        provider_type=ProviderType.GEMINI,
-        endpoint_name="gemini-acc2",
-        model_id="gemini-2.5-pro",
-        max_tokens=4096,
-    ),
-    # PRIMARY: Qwen3 Coder via OpenRouter — specialized untuk coding
-    # Bot Anda fokus productivity → query coding sering masuk
-    ModelRoute(
-        name="OpenRouter Qwen3 Coder (acc1)",
-        provider_type=ProviderType.OPENROUTER,
-        endpoint_name="openrouter-acc1",
-        model_id="qwen/qwen3-coder:free",
-        max_tokens=4096,
-    ),
-    ModelRoute(
-        name="OpenRouter Qwen3 Coder (acc2)",
-        provider_type=ProviderType.OPENROUTER,
-        endpoint_name="openrouter-acc2",
-        model_id="qwen/qwen3-coder:free",
-        max_tokens=4096,
-    ),
-    # FALLBACK: Nemotron 120B — flagship NVIDIA
-    ModelRoute(
-        name="OpenRouter Nemotron 120B (acc1)",
-        provider_type=ProviderType.OPENROUTER,
-        endpoint_name="openrouter-acc1",
-        model_id="nvidia/nemotron-3-super-120b-a12b:free",
-        max_tokens=4096,
-    ),
-    ModelRoute(
-        name="OpenRouter Nemotron 120B (acc2)",
-        provider_type=ProviderType.OPENROUTER,
-        endpoint_name="openrouter-acc2",
-        model_id="nvidia/nemotron-3-super-120b-a12b:free",
-        max_tokens=4096,
-    ),
-    # FALLBACK: Groq models (faster fallback)
+    # ── PRIMARY: Groq — paling cepat, quota generous ──────────
     ModelRoute(
         name="Groq Qwen3 32B",
         provider_type=ProviderType.GROQ,
@@ -224,7 +179,40 @@ TIER_3_ROUTES = [
         model_id="llama-3.3-70b-versatile",
         max_tokens=4096,
     ),
-    # LAST RESORT: GPT-OSS via OpenRouter
+
+    # ── SECONDARY: Gemini Flash — quota lebih longgar dari Pro ─
+    ModelRoute(
+        name="Gemini 2.5 Flash (acc1)",
+        provider_type=ProviderType.GEMINI,
+        endpoint_name="gemini-acc1",
+        model_id="gemini-2.5-flash",
+        max_tokens=4096,
+    ),
+    ModelRoute(
+        name="Gemini 2.5 Flash (acc2)",
+        provider_type=ProviderType.GEMINI,
+        endpoint_name="gemini-acc2",
+        model_id="gemini-2.5-flash",
+        max_tokens=4096,
+    ),
+
+    # ── TERTIARY: OpenRouter Qwen3 Coder — bagus untuk coding ─
+    ModelRoute(
+        name="OpenRouter Qwen3 Coder (acc1)",
+        provider_type=ProviderType.OPENROUTER,
+        endpoint_name="openrouter-acc1",
+        model_id="qwen/qwen3-coder:free",
+        max_tokens=4096,
+    ),
+    ModelRoute(
+        name="OpenRouter Qwen3 Coder (acc2)",
+        provider_type=ProviderType.OPENROUTER,
+        endpoint_name="openrouter-acc2",
+        model_id="qwen/qwen3-coder:free",
+        max_tokens=4096,
+    ),
+
+    # ── FALLBACK: OpenRouter GPT-OSS ──────────────────────────
     ModelRoute(
         name="OpenRouter GPT-OSS 120B (acc1)",
         provider_type=ProviderType.OPENROUTER,
@@ -237,6 +225,39 @@ TIER_3_ROUTES = [
         provider_type=ProviderType.OPENROUTER,
         endpoint_name="openrouter-acc2",
         model_id="openai/gpt-oss-120b:free",
+        max_tokens=4096,
+    ),
+
+    # ── DEEP FALLBACK: Nemotron — lambat tapi powerful ────────
+    ModelRoute(
+        name="OpenRouter Nemotron 120B (acc1)",
+        provider_type=ProviderType.OPENROUTER,
+        endpoint_name="openrouter-acc1",
+        model_id="nvidia/nemotron-3-super-120b-a12b:free",
+        max_tokens=4096,
+    ),
+    ModelRoute(
+        name="OpenRouter Nemotron 120B (acc2)",
+        provider_type=ProviderType.OPENROUTER,
+        endpoint_name="openrouter-acc2",
+        model_id="nvidia/nemotron-3-super-120b-a12b:free",
+        max_tokens=4096,
+    ),
+
+    # ── LAST RESORT: Gemini Pro — hemat untuk yang benar penting
+    # Quota: 25 req/hari per akun — gunakan hanya kalau semua di atas gagal
+    ModelRoute(
+        name="Gemini 2.5 Pro (acc1)",
+        provider_type=ProviderType.GEMINI,
+        endpoint_name="gemini-acc1",
+        model_id="gemini-2.5-pro",
+        max_tokens=4096,
+    ),
+    ModelRoute(
+        name="Gemini 2.5 Pro (acc2)",
+        provider_type=ProviderType.GEMINI,
+        endpoint_name="gemini-acc2",
+        model_id="gemini-2.5-pro",
         max_tokens=4096,
     ),
 ]
@@ -302,8 +323,7 @@ FREE_TIER_WHITELIST: dict[ProviderType, set[str]] = {
         "gemma-3-27b-it",
         "gemma-3-12b-it",
     },
-    # OpenRouter: validated by ":free" suffix check
-    ProviderType.OPENROUTER: set(),
+    ProviderType.OPENROUTER: set(),  # Validated by ":free" suffix
 }
 
 
@@ -320,7 +340,7 @@ def assert_free_tier_only() -> None:
                 if not model_id.endswith(":free"):
                     violations.append(
                         f"OpenRouter '{route.name}' → {model_id} "
-                        f"(missing ':free' suffix, akan dikenai biaya!)"
+                        f"(missing ':free' suffix)"
                     )
                 continue
 
@@ -334,11 +354,6 @@ def assert_free_tier_only() -> None:
     if violations:
         msg = (
             "\n⚠️  FREE-TIER SAFETY CHECK FAILED ⚠️\n"
-            "Routes berikut TIDAK terverifikasi sebagai free tier:\n"
             + "\n".join(f"  ❌ {v}" for v in violations)
-            + "\n\nPilihan:\n"
-            "  1. Ganti model ke yang ada di whitelist\n"
-            "  2. Tambahkan model ke FREE_TIER_WHITELIST kalau yakin gratis\n"
-            "  3. Untuk OpenRouter, pastikan model_id berakhiran ':free'\n"
         )
         raise AssertionError(msg)

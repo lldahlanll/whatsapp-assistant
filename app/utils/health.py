@@ -1,3 +1,4 @@
+# app/utils/health.py
 import json
 from datetime import datetime
 
@@ -18,10 +19,11 @@ class HealthServer:
         self._setup_routes()
 
     def _setup_routes(self) -> None:
-        self.app.router.add_get("/health", self.handle_health)
-        self.app.router.add_get("/stats", self.handle_stats)
-        self.app.router.add_get("/metrics", self.handle_metrics)
-        self.app.router.add_get("/locks", self.handle_locks)
+        self.app.router.add_get("/health",   self.handle_health)
+        self.app.router.add_get("/stats",    self.handle_stats)
+        self.app.router.add_get("/metrics",  self.handle_metrics)
+        self.app.router.add_get("/locks",    self.handle_locks)
+        self.app.router.add_get("/breakers", self.handle_breakers)  # NEW
 
     async def handle_health(self, request: web.Request) -> web.Response:
         redis_ok = await memory_manager.ping()
@@ -39,11 +41,36 @@ class HealthServer:
             },
             status=200 if status == "UP" else 503,
         )
-    
+
     async def handle_locks(self, request: web.Request) -> web.Response:
-        """GET /locks — lihat status per-JID lock (debugging)."""
         from app.utils.locks import jid_lock_manager
         return web.json_response(jid_lock_manager.stats())
+
+    async def handle_breakers(self, request: web.Request) -> web.Response:
+        """
+        GET /breakers — lihat circuit breaker status semua model.
+
+        Response example:
+        {
+          "disabled_count": 2,
+          "models": {
+            "gemini-acc1:gemini-2.5-pro": {
+              "remaining_sec": 42300,
+              "remaining_human": "11h 45m",
+              "reason": "HTTP 429 (quota)",
+              "duration_total": 43200
+            }
+          }
+        }
+
+        Juga support POST /breakers/reset?key=... untuk reset manual.
+        """
+        from app.ai.client import multi_client
+        breaker_data = await multi_client.breaker_status()
+        return web.json_response({
+            "disabled_count": len(breaker_data),
+            "models": breaker_data,
+        })
 
     async def handle_stats(self, request: web.Request) -> web.Response:
         return web.json_response(await stats_tracker.get_daily_summary())
@@ -57,10 +84,10 @@ class HealthServer:
         )[0]
 
         return web.json_response({
-            "messages_today": summary.get("messages_received", 0),
-            "success_rate": summary.get("success_rate", 0),
-            "active_users": summary.get("active_users", 0),
-            "top_model": top_model,
+            "messages_today":  summary.get("messages_received", 0),
+            "success_rate":    summary.get("success_rate", 0),
+            "active_users":    summary.get("active_users", 0),
+            "top_model":       top_model,
         })
 
     async def start(self) -> None:

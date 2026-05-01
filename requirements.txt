@@ -16,7 +16,8 @@ redis==5.0.4
 # Logging
 loguru==0.7.2
 
-
+# Cryptography
+cryptography>=42.0.0
 
 
 # Penjelasan tiap dependency:

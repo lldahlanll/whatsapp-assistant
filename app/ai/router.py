@@ -5,10 +5,11 @@ from typing import Optional
 from loguru import logger
 
 from app.ai.client import multi_client
-from app.ai.models import ModelTier, get_fallback_routes
+from app.ai.models import ModelRoute, ModelTier, get_fallback_routes
+from app.ai.postprocess import clean_llm_output
 from app.ai.prompts import ChatContext, build_system_prompt
 
-# ── Keywords (sama seperti sebelumnya) ────────────────────────
+# ── Keywords ──────────────────────────────────────────────────
 TIER3_KEYWORDS = [
     "code", "kode", "program", "debug", "error", "function", "class",
     "algorithm", "algoritma", "database", "query", "sql", "api",
@@ -35,6 +36,34 @@ _TIER2_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# ── Token size guard ──────────────────────────────────────────
+# Groq menghitung token lebih banyak dari estimasi chars/4 karena:
+# - System prompt Nara ~2700 chars ≈ 1000+ tokens (formatting overhead)
+# - Bahasa Indonesia tokenize lebih boros dari English
+# - Special chars (emoji, bold markers) kadang multi-token
+#
+# Pendekatan aman: pakai chars sebagai proxy langsung dengan safety buffer
+# Groq Qwen3 6k TPM limit → kita set hard cap di 5000 chars untuk request
+# yang masuk ke model ini (bukan total, tapi content di luar system prompt)
+#
+# Setelah observasi: system prompt ~2700 chars sudah ~1500+ tokens di Groq
+# Sisa budget untuk history+user: 6000 - 1500 = 4500 tokens ≈ 9000 chars
+_CHARS_PER_TOKEN = 4  # Dipakai hanya untuk logging estimate
+
+# Model-specific char limits untuk NON-SYSTEM content (history + user message)
+# Key: model_id, Value: max chars untuk history+user (TIDAK termasuk system prompt)
+_MODEL_CONTENT_CHAR_LIMITS: dict[str, int] = {
+    # Groq Qwen3: 6k TPM, system prompt ~1500 token → sisa ~4500 token ≈ 9000 chars
+    "qwen/qwen3-32b":                            9_000,
+    # Groq Llama models: sama limit-nya
+    "llama-3.1-8b-instant":                      9_000,
+    "llama-3.3-70b-versatile":                   9_000,
+    "meta-llama/llama-4-scout-17b-16e-instruct": 9_000,
+    # GPT-OSS lebih longgar berdasarkan observasi
+    "openai/gpt-oss-120b":                       20_000,
+    # Gemini & OpenRouter: tidak ada masalah size, skip guard
+}
+
 
 def classify_message(text: str) -> ModelTier:
     text_clean = text.strip()
@@ -60,6 +89,43 @@ def classify_message(text: str) -> ModelTier:
     return ModelTier.TIER_1
 
 
+def _estimate_total_chars(messages: list[dict]) -> int:
+    """Hitung total karakter semua messages (untuk logging)."""
+    return sum(len(m.get("content", "")) for m in messages)
+
+
+def _content_chars(messages: list[dict]) -> int:
+    """
+    Hitung chars NON-SYSTEM messages (history + user).
+    System prompt sudah di-handle oleh model, yang membebani
+    token budget adalah content dari history & user message.
+    """
+    return sum(
+        len(m.get("content", ""))
+        for m in messages
+        if m.get("role") != "system"
+    )
+
+
+def _messages_fit_model(messages: list[dict], model_id: str) -> bool:
+    """
+    Cek apakah content messages (non-system) masuk dalam batas model.
+    Return True kalau aman, False kalau skip diperlukan.
+    """
+    limit = _MODEL_CONTENT_CHAR_LIMITS.get(model_id)
+    if limit is None:
+        return True  # Model tidak ada di list → asumsikan aman
+
+    content_chars = _content_chars(messages)
+    if content_chars > limit:
+        logger.warning(
+            f"[Router] ⚠️ Skip {model_id}: "
+            f"content {content_chars} chars > {limit} limit"
+        )
+        return False
+    return True
+
+
 async def route_and_generate(
     history: list[dict],
     user_text: str,
@@ -69,9 +135,9 @@ async def route_and_generate(
     Classify → build prompt → fallback chain via multi-provider.
 
     Args:
-        history: User-assistant history dari memory (TANPA system prompt)
+        history  : User-assistant history dari memory (TANPA system prompt)
         user_text: Pesan user terbaru (untuk classifier)
-        context: ChatContext untuk inject info kontekstual
+        context  : ChatContext untuk inject info kontekstual
 
     Returns:
         (response_text, route_name). response="" kalau semua gagal.
@@ -91,28 +157,52 @@ async def route_and_generate(
         logger.error("[Router] No routes available for tier")
         return "", "none"
 
+    total_chars = _estimate_total_chars(messages)
     logger.info(
         f"[Router] Tier {tier.name} | {len(routes)} routes | "
         f"prompt: {len(system_prompt)} chars | "
-        f"history: {len(history)} msgs"
+        f"history: {len(history)} msgs | "
+        f"total: ~{total_chars // _CHARS_PER_TOKEN} tokens"
     )
 
     # 5. Try fallback chain
     for i, route in enumerate(routes, 1):
+
+        # Size guard: skip model kalau messages terlalu besar
+        if not _messages_fit_model(messages, route.model_id):
+            logger.info(
+                f"[Router] [{i}/{len(routes)}] Skip {route.name}: "
+                f"messages too large for this model"
+            )
+            continue
+
         logger.info(
             f"[Router] [{i}/{len(routes)}] Trying {route.name} "
             f"({route.endpoint_name}/{route.model_id})"
         )
 
-        response = await multi_client.call(
+        raw_response = await multi_client.call(
             endpoint_name=route.endpoint_name,
             model_id=route.model_id,
             messages=messages,
             max_tokens=route.max_tokens,
         )
 
-        if response:
-            logger.info(f"[Router] ✓ Success: {route.name}")
+        if raw_response:
+            # Post-process: strip <think> tags, normalize whitespace
+            response = clean_llm_output(raw_response)
+
+            if not response:
+                # Setelah di-clean jadi kosong (hanya thinking, no real output)
+                logger.warning(
+                    f"[Router] {route.name} returned only thinking content, skip"
+                )
+                continue
+
+            logger.info(
+                f"[Router] ✓ Success: {route.name} "
+                f"| raw={len(raw_response)} clean={len(response)} chars"
+            )
             return response, route.name
 
         logger.warning(f"[Router] ✗ Failed: {route.name}")

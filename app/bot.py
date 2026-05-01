@@ -1,3 +1,4 @@
+# app/bot.py
 import asyncio
 import re
 import time
@@ -12,17 +13,18 @@ from neonize.utils.enum import ChatPresence, ChatPresenceMedia
 
 from app.ai import route_and_generate
 from app.ai.prompts import ChatContext
+from app.auth import (
+    admin_handler,
+    check_auth,
+    AuthState,
+    login_handler,
+    whitelist,
+)
 from app.config import settings
+from app.email import email_command_handler, validate_email_server_config
 from app.memory import memory_manager
 from app.utils.locks import jid_lock_manager
 from app.utils.stats import stats_tracker
-
-COMMANDS = {
-    "/reset": "Hapus riwayat percakapan",
-    "/stats": "Lihat statistik percakapan",
-    "/help":  "Tampilkan daftar perintah",
-    "/ping":  "Cek bot aktif",
-}
 
 
 class WhatsAppBot:
@@ -34,8 +36,6 @@ class WhatsAppBot:
         self._stop_event = asyncio.Event()
         self._register_events()
 
-    # ── Event registration ────────────────────────────────────
-
     def _register_events(self) -> None:
         @self.client.event(ConnectedEv)
         async def on_connected(client: NewAClient, event: ConnectedEv):
@@ -43,18 +43,27 @@ class WhatsAppBot:
                 me = await client.get_me()
                 self.bot_jid = f"{me.JID.User}@{me.JID.Server}"
                 self.bot_number = me.JID.User
-                # Konsisten pakai .User (uppercase) — sesuai proto neonize
                 if hasattr(me, "LID") and me.LID and me.LID.User:
                     self.bot_lid = f"{me.LID.User}@{me.LID.Server}"
             except Exception as e:
-                logger.warning(f"[Bot] Could not get bot JID: {e}")  # f-string fix
+                logger.warning(f"[Bot] Could not get bot JID: {e}")
 
             redis_ok = await memory_manager.ping()
+            email_config_ok = validate_email_server_config()
+            admin_count = len(whitelist.get_admin_jids())
+
             logger.info(f"[Bot] ✓ Connected as: {self.bot_jid}")
             logger.info(f"[Bot] LID: {self.bot_lid or '(none)'}")
             logger.info(f"[Bot] Bot number: {self.bot_number}")
             logger.info(f"[Bot] Bot name: {settings.bot_name}")
             logger.info(f"[Bot] Redis: {'✓ OK' if redis_ok else '✗ FAIL'}")
+            logger.info(f"[Bot] Email config: {'✓ OK' if email_config_ok else '✗ INCOMPLETE'}")
+            logger.info(f"[Bot] Admins configured: {admin_count}")
+
+            login_handler.set_admin_notify_callback(
+                self._make_admin_notify_callback(client)
+            )
+            logger.info("[Bot] Admin notify callback registered")
 
         @self.client.event(DisconnectedEv)
         async def on_disconnected(client: NewAClient, event: DisconnectedEv):
@@ -62,24 +71,36 @@ class WhatsAppBot:
 
         @self.client.event(MessageEv)
         async def on_message(client: NewAClient, event: MessageEv):
-            # Spawn task agar event loop tidak ke-block
             asyncio.create_task(self._handle_message_safe(client, event))
 
-    # ── Message handler dengan per-JID lock ───────────────────
+    def _make_admin_notify_callback(self, client: NewAClient):
+        async def notify_admin(admin_jid: str, push_name: str, message: str):
+            try:
+                target = self._parse_jid(admin_jid)
+                if not target:
+                    logger.error(f"[Bot] Could not parse admin JID: {admin_jid}")
+                    return
 
-    async def _handle_message_safe(
-        self, client: NewAClient, event: MessageEv
-    ) -> None:
-        """Wrapper yang catch semua exception."""
+                logger.info(
+                    f"[Bot] Sending admin notif → "
+                    f"User={target.User} Server={target.Server}"
+                )
+                await client.send_message(target, message)
+                logger.info(f"[Bot] ✓ Notified admin {admin_jid}")
+            except Exception as e:
+                logger.error(
+                    f"[Bot] Failed to notify admin {admin_jid}: {e}"
+                )
+        return notify_admin
+
+    async def _handle_message_safe(self, client, event):
         try:
             await self._handle_message(client, event)
         except Exception as e:
             logger.error(f"[Bot] Unhandled error: {e}")
             logger.error(f"[Bot] Traceback:\n{traceback.format_exc()}")
 
-    async def _handle_message(
-        self, client: NewAClient, event: MessageEv
-    ) -> None:
+    async def _handle_message(self, client, event):
         source = event.Info.MessageSource
         if source.IsFromMe:
             return
@@ -99,28 +120,24 @@ class WhatsAppBot:
             f"Text: {text[:60]}{'...' if len(text) > 60 else ''}"
         )
 
-        # ── Rate limit per sender (bukan per chat) ────────────
         if await memory_manager.is_rate_limited(sender_jid):
             logger.warning(f"[Bot] ⚠️ SPAM dari {sender_jid}, ignored")
             return
 
         await stats_tracker.track_message_received(chat_jid, is_group)
 
-        # Filter group: hanya balas kalau di-mention atau di-reply
         if is_group and not self._should_reply_in_group(event, text):
             return
 
-        # ── Per-JID lock: serialize per chat ──────────────────
+        # Per-USER lock (sender_jid) untuk multi-user isolation
         try:
-            async with jid_lock_manager.acquire(chat_jid, timeout=120.0):
+            async with jid_lock_manager.acquire(sender_jid, timeout=120.0):
                 await self._process_message(
-                    client, event, chat_jid, push_name, is_group, text
+                    client, event, sender_jid, chat_jid,
+                    push_name, is_group, text,
                 )
         except asyncio.TimeoutError:
-            logger.error(
-                f"[Bot] Lock timeout for {chat_jid} — pesan dari {sender_jid} di-skip"
-            )
-            # Optional: kasih tau user
+            logger.error(f"[Bot] Lock timeout for {sender_jid}")
             try:
                 await self._send_reply(
                     client, event,
@@ -130,36 +147,48 @@ class WhatsAppBot:
                 pass
 
     async def _process_message(
-        self,
-        client: NewAClient,
-        event: MessageEv,
+        self, client, event,
+        sender_jid: str,
         chat_jid: str,
         push_name: str,
         is_group: bool,
         text: str,
     ) -> None:
         await memory_manager.save_meta(
-            jid=chat_jid,
-            push_name=push_name,
-            is_group=is_group,
+            jid=chat_jid, push_name=push_name, is_group=is_group,
         )
 
-        # ── Command ───────────────────────────────────────────
         if text.startswith("/"):
-            response = await self._handle_command(text, chat_jid)
+            chat_jid_proto = event.Info.MessageSource.Chat
+            needs_typing = self._command_needs_typing(text)
+
+            if needs_typing:
+                await self._send_typing(client, chat_jid_proto, True)
+
+            try:
+                response = await self._handle_command(text, sender_jid, push_name)
+            finally:
+                if needs_typing:
+                    await self._send_typing(client, chat_jid_proto, False)
+
             if response:
                 await self._send_reply(client, event, self._format_md(response))
             return
 
-         # ── AI generation dengan layered prompt ──────────────
+        # ── AI conversation: butuh user authorized ────────────
+        auth = await check_auth(sender_jid, require_credential=False)
+        if not auth.is_authorized:
+            await self._send_reply(
+                client, event,
+                self._format_md(auth.get_response_message()),
+            )
+            return
+
         await memory_manager.add_message(chat_jid, "user", text)
         history = await memory_manager.get_history(chat_jid)
 
-        # Build chat context
         chat_context = ChatContext(
-            push_name=push_name,
-            is_group=is_group,
-            timezone_offset=7,  # WIB
+            push_name=push_name, is_group=is_group, timezone_offset=7,
         )
 
         await self._send_typing(client, event.Info.MessageSource.Chat, True)
@@ -167,9 +196,7 @@ class WhatsAppBot:
         t_start = time.monotonic()
         try:
             response, model_used = await route_and_generate(
-                history=history,
-                user_text=text,
-                context=chat_context,
+                history=history, user_text=text, context=chat_context,
             )
         finally:
             await self._send_typing(client, event.Info.MessageSource.Chat, False)
@@ -185,13 +212,135 @@ class WhatsAppBot:
             await self._send_reply(client, event, self._format_md(response))
         else:
             await stats_tracker.track_response("none", False, t_elapsed_ms)
-            logger.error("[Bot] All models failed")
             await self._send_reply(
                 client, event,
                 "⚠️ Maaf, lagi ada gangguan teknis. Coba lagi sebentar lagi ya."
             )
 
-    # ── Helpers ───────────────────────────────────────────────
+    async def _handle_command(
+        self, text: str, jid: str, push_name: str
+    ) -> str:
+        cmd_lower = text.strip().lower()
+
+        # Auth commands
+        if (cmd_lower.startswith("/login")
+                or cmd_lower in ("/logout", "/whoami")):
+            await stats_tracker.track_command(cmd_lower.split()[0])
+            return await login_handler.handle(text, jid, push_name)
+
+        # Admin commands
+        if cmd_lower.startswith("/admin"):
+            await stats_tracker.track_command("/admin")
+            return await admin_handler.handle(text, jid)
+
+        # Email commands
+        if cmd_lower.startswith("/email"):
+            await stats_tracker.track_command("/email")
+            return await email_command_handler.handle(text, jid)
+
+        cmd = cmd_lower.split()[0]
+        await stats_tracker.track_command(cmd)
+
+        # Public commands
+        if cmd == "/help":
+            return self._build_help_text(jid)
+
+        if cmd == "/ping":
+            return await self._cmd_ping()
+
+        # Authenticated commands
+        auth = await check_auth(jid, require_credential=False)
+        if not auth.is_authorized:
+            return auth.get_response_message()
+
+        if cmd == "/reset":
+            ok = await memory_manager.clear_history(jid)
+            return (
+                "🗑️ Riwayat percakapan berhasil dihapus."
+                if ok else "⚠️ Gagal menghapus riwayat."
+            )
+
+        if cmd == "/stats":
+            stats = await memory_manager.get_stats(jid)
+            if stats:
+                return (
+                    f"📊 *Statistik Percakapan*\n"
+                    f"├ Pesan tersimpan : {stats['message_count']}/{stats['max_history']}\n"
+                    f"├ TTL             : {stats['ttl_hours']} jam\n"
+                    f"└ Chat ID         : ...{jid[-20:]}"
+                )
+            return "⚠️ Gagal mengambil statistik."
+
+        return ""
+
+    async def _cmd_ping(self) -> str:
+        from app.ai.client import multi_client
+        redis_ok = await memory_manager.ping()
+        breaker_data = await multi_client.breaker_status()
+        disabled_count = len(breaker_data)
+        breaker_text = (
+            f"⚠️ {disabled_count} model disabled"
+            if disabled_count > 0 else "✓ All models OK"
+        )
+        email_status = "✓ Configured" if validate_email_server_config() else "✗ Not set"
+        return (
+            f"🏓 Pong!\n"
+            f"├ Bot      : ✓ Online\n"
+            f"├ Redis    : {'✓ Connected' if redis_ok else '✗ Disconnected'}\n"
+            f"├ Models   : {breaker_text}\n"
+            f"├ Email    : {email_status}\n"
+            f"└ Mode     : 🔐 Multi-user"
+        )
+
+    def _build_help_text(self, jid: str) -> str:
+        is_admin = whitelist.is_admin(jid)
+
+        lines = [
+            f"🤖 *{settings.bot_name} — Perintah*\n",
+            "*🔐 Authentication:*",
+            "• `/login email password` — login fresh",
+            "• `/login` — quick re-login",
+            "• `/logout` — logout (cred tetap)",
+            "• `/whoami` — cek status\n",
+            "*💬 Chat & Memory:*",
+            "• `/reset` — hapus riwayat",
+            "• `/stats` — statistik",
+            "• `/ping` — status bot",
+            "• `/help` — tampilkan ini\n",
+            "*📧 Email (butuh login):*",
+            "• `/email today` — rangkum hari ini",
+            "• `/email unread` — belum dibaca",
+            "• `/email summary <date>` — tanggal tertentu",
+            "• `/email reply <uid> <instruksi>`",
+            "• `/email send <to>|<subj>|<isi>`",
+            "• `/email help` — semua command email",
+        ]
+
+        if is_admin:
+            lines.extend([
+                "\n*👑 Admin:*",
+                "• `/admin add <jid> <nama>`",
+                "• `/admin remove <jid>`",
+                "• `/admin list`",
+                "• `/admin logout <jid>`",
+            ])
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _command_needs_typing(text: str) -> bool:
+        cmd_lower = text.strip().lower()
+
+        instant_commands = {
+            "/help", "/reset", "/whoami", "/logout",
+            "/email cancel", "/email help",
+            "/admin help", "/admin list",
+        }
+
+        first_two_words = " ".join(cmd_lower.split()[:2])
+        if cmd_lower in instant_commands or first_two_words in instant_commands:
+            return False
+        return True
 
     @staticmethod
     def _extract_text(event: MessageEv) -> str:
@@ -206,14 +355,12 @@ class WhatsAppBot:
                 and msg.buttonsResponseMessage.selectedDisplayText):
             return msg.buttonsResponseMessage.selectedDisplayText.strip()
         return ""
-    
+
     def _is_self_jid(self, jid_str: str) -> bool:
-        """Cek apakah JID merujuk ke bot — agnostik @s.whatsapp.net / @lid / @c.us."""
         if not jid_str:
             return False
         if jid_str == self.bot_jid or jid_str == self.bot_lid:
             return True
-        # Compare hanya bagian User (nomor), buang device suffix kalau ada
         user_part = jid_str.split("@")[0].split(":")[0]
         if user_part == self.bot_number:
             return True
@@ -235,7 +382,6 @@ class WhatsAppBot:
                 jid_str = j if isinstance(j, str) else f"{j.User}@{j.Server}"
                 if self._is_self_jid(jid_str):
                     return True
-
             if ctx.participant:
                 participant_jid = f"{ctx.participant.User}@{ctx.participant.Server}"
                 if self._is_self_jid(participant_jid):
@@ -245,97 +391,71 @@ class WhatsAppBot:
             return True
         if self.bot_lid and f"@{self.bot_lid.split('@')[0]}" in text:
             return True
-
         return False
-    
+
     @staticmethod
     def _format_md(text: str) -> str:
-        """Convert Markdown → WhatsApp format."""
         text = re.sub(r"\*\*(.*?)\*\*", r"*\1*", text)
         text = re.sub(r"#{1,6}\s*(.*)", r"*\1*", text)
         text = re.sub(r"\[(.*?)\]\((.*?)\)", r"\1 (\2)", text)
         return text
 
-    async def _handle_command(self, text: str, jid: str) -> str:
-        cmd = text.strip().lower().split()[0]
-        await stats_tracker.track_command(cmd)
+    @staticmethod
+    def _parse_jid(jid_str: str) -> Optional[JID]:
+        """
+        Parse JID string ke proto JID untuk neonize send_message.
 
-        if cmd == "/reset":
-            ok = await memory_manager.clear_history(jid)
-            return (
-                "🗑️ Riwayat percakapan berhasil dihapus. Mulai dari awal!"
-                if ok else
-                "⚠️ Gagal menghapus riwayat. Coba lagi."
-            )
+        Support format:
+        - 628xxx@s.whatsapp.net  (standard WhatsApp)
+        - 628xxx@c.us            (legacy contact)
+        - 12345@lid              (LID / private number)
 
-        if cmd == "/stats":
-            stats = await memory_manager.get_stats(jid)
-            if stats:
-                return (
-                    f"📊 *Statistik Percakapan*\n"
-                    f"├ Pesan tersimpan : {stats['message_count']}/{stats['max_history']}\n"
-                    f"├ TTL             : {stats['ttl_hours']} jam tersisa\n"
-                    f"└ Chat ID         : ...{jid[-20:]}"
-                )
-            return "⚠️ Gagal mengambil statistik."
+        Neonize JID protobuf butuh field:
+        - User, Server (required)
+        - RawAgent, Device, Integrator (default 0)
+        """
+        try:
+            user, server = jid_str.split("@")
+            if not user or not server:
+                logger.error(f"[Bot] Empty user/server in JID: {jid_str}")
+                return None
 
-        if cmd == "/help":
-            lines = [f"🤖 *{settings.bot_name} — Perintah Tersedia*\n"]
-            for command, desc in COMMANDS.items():
-                lines.append(f"• `{command}` — {desc}")
-            return "\n".join(lines)
+            jid = JID()
+            jid.User = user
+            jid.Server = server
+            # Required fields oleh neonize protobuf — set default 0
+            jid.RawAgent = 0
+            jid.Device = 0
+            jid.Integrator = 0
+            return jid
+        except Exception as e:
+            logger.error(f"[Bot] Invalid JID format '{jid_str}': {e}")
+            return None
 
-        if cmd == "/ping":
-            redis_ok = await memory_manager.ping()
-            return (
-                f"🏓 Pong!\n"
-                f"├ Bot   : ✓ Online\n"
-                f"└ Redis : {'✓ Connected' if redis_ok else '✗ Disconnected'}"
-            )
-
-        return ""
-
-    async def _send_reply(
-        self, client: NewAClient, event: MessageEv, text: str
-    ) -> None:
-        t0 = time.monotonic()
+    async def _send_reply(self, client, event, text: str) -> None:
         try:
             await client.reply_message(text, event)
-            elapsed = (time.monotonic() - t0) * 1000
-            logger.debug(f"[Bot] ✓ Reply sent in {elapsed:.0f}ms")
-            logger.debug("[Bot] ✓ Reply sent")
         except Exception as e:
             logger.error(f"[Bot] Failed to send reply: {e}")
 
-    async def _send_typing(
-        self, client: NewAClient, chat_jid: JID, is_typing: bool
-    ) -> None:
+    async def _send_typing(self, client, chat_jid: JID, is_typing: bool) -> None:
         try:
             state = (
                 ChatPresence.CHAT_PRESENCE_COMPOSING
-                if is_typing else
-                ChatPresence.CHAT_PRESENCE_PAUSED
+                if is_typing else ChatPresence.CHAT_PRESENCE_PAUSED
             )
             await client.send_chat_presence(
                 chat_jid, state, ChatPresenceMedia.CHAT_PRESENCE_MEDIA_TEXT
             )
         except Exception as e:
-            logger.debug(f"[Bot] Typing indicator failed (non-critical): {e}")
-
-    # ── Lifecycle ─────────────────────────────────────────────
+            logger.debug(f"[Bot] Typing indicator failed: {e}")
 
     async def start(self) -> None:
         logger.info(f"[Bot] Starting {settings.bot_name}...")
-        logger.info(f"[Bot] Session: {settings.session_name}")
+        logger.info(f"[Bot] Mode: 🔐 Multi-user")
         logger.info("[Bot] Connecting to WhatsApp...")
         await self.client.connect()
         await self.client.idle()
 
     async def stop(self) -> None:
-        """Graceful disconnect."""
-        try:
-            # Neonize tidak punya disconnect eksplisit yang clean,
-            # idle() akan break ketika client di-close internal
-            logger.info("[Bot] Stop requested")
-        except Exception as e:
-            logger.error(f"[Bot] Error during stop: {e}")
+        logger.info("[Bot] Stop requested")
