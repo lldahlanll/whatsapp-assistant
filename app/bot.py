@@ -25,6 +25,7 @@ from app.email import email_command_handler, validate_email_server_config
 from app.memory import memory_manager
 from app.utils.locks import jid_lock_manager
 from app.utils.stats import stats_tracker
+from app.email.scheduler import email_scheduler
 
 
 class WhatsAppBot:
@@ -57,13 +58,18 @@ class WhatsAppBot:
             logger.info(f"[Bot] Bot number: {self.bot_number}")
             logger.info(f"[Bot] Bot name: {settings.bot_name}")
             logger.info(f"[Bot] Redis: {'✓ OK' if redis_ok else '✗ FAIL'}")
-            logger.info(f"[Bot] Email config: {'✓ OK' if email_config_ok else '✗ INCOMPLETE'}")
+            logger.info(
+                f"[Bot] Email config: {'✓ OK' if email_config_ok else '✗ INCOMPLETE'}"
+            )
             logger.info(f"[Bot] Admins configured: {admin_count}")
 
             login_handler.set_admin_notify_callback(
                 self._make_admin_notify_callback(client)
             )
             logger.info("[Bot] Admin notify callback registered")
+
+            # ── Start multi-user email scheduler ─────────────────────
+            await self._start_email_scheduler(client)
 
         @self.client.event(DisconnectedEv)
         async def on_disconnected(client: NewAClient, event: DisconnectedEv):
@@ -88,10 +94,62 @@ class WhatsAppBot:
                 await client.send_message(target, message)
                 logger.info(f"[Bot] ✓ Notified admin {admin_jid}")
             except Exception as e:
-                logger.error(
-                    f"[Bot] Failed to notify admin {admin_jid}: {e}"
-                )
+                logger.error(f"[Bot] Failed to notify admin {admin_jid}: {e}")
+
         return notify_admin
+
+        async def _start_email_scheduler(self, client: NewAClient) -> None:
+            """Start multi-user email scheduler dengan per-user notify callback."""
+            if not settings.multi_user_configured:
+                logger.info("[Bot] multi_user_configured=False — scheduler skipped")
+                return
+
+            async def _notify_user(
+                jid: str,
+                emails: list,
+                error: str | None = None,
+            ) -> None:
+                target = self._parse_jid(jid)
+                if not target:
+                    logger.error(f"[Bot] Could not parse JID for notify: {jid}")
+                    return
+
+                if error == "auth_failed":
+                    msg = (
+                        "⚠️ *Notifikasi email dinonaktifkan*\n\n"
+                        "Password email kamu sudah tidak valid.\n"
+                        "Silakan `/logout` lalu `/login` ulang dengan password terbaru."
+                    )
+                elif not emails:
+                    return
+                else:
+                    lines = [f"🔔 *{len(emails)} email baru!*\n"]
+                    for e in emails[:5]:
+                        att = " 📎" if e.attachments else ""
+                        lines.append(
+                            f"🔵 *{e.subject[:45]}*\n"
+                            f"   Dari: {e.sender_email}{att}\n"
+                            f"   {e.received_at.strftime('%H:%M')} | UID: `{e.uid}`"
+                        )
+                    if len(emails) > 5:
+                        lines.append(f"\n_...dan {len(emails) - 5} lainnya_")
+                    lines.append("\n💡 `/email today` untuk ringkasan lengkap")
+                    msg = "\n".join(lines)
+
+                try:
+                    await client.send_message(target, msg)
+                    logger.info(
+                        f"[Bot] ✓ Email notify sent → {jid} ({len(emails)} emails)"
+                    )
+                except Exception as e:
+                    logger.error(f"[Bot] Failed to send notify to {jid}: {e}")
+
+            email_scheduler.set_notify_callback(_notify_user)
+            await email_scheduler.start()
+            logger.info(
+                f"[Bot] ✓ Email scheduler started "
+                f"(interval={settings.email_poll_interval_seconds}s)"
+            )
 
     async def _handle_message_safe(self, client, event):
         try:
@@ -133,21 +191,27 @@ class WhatsAppBot:
         try:
             async with jid_lock_manager.acquire(sender_jid, timeout=120.0):
                 await self._process_message(
-                    client, event, sender_jid, chat_jid,
-                    push_name, is_group, text,
+                    client,
+                    event,
+                    sender_jid,
+                    chat_jid,
+                    push_name,
+                    is_group,
+                    text,
                 )
         except asyncio.TimeoutError:
             logger.error(f"[Bot] Lock timeout for {sender_jid}")
             try:
                 await self._send_reply(
-                    client, event,
-                    "⚠️ Bot sedang sibuk, coba lagi sebentar."
+                    client, event, "⚠️ Bot sedang sibuk, coba lagi sebentar."
                 )
             except Exception:
                 pass
 
     async def _process_message(
-        self, client, event,
+        self,
+        client,
+        event,
         sender_jid: str,
         chat_jid: str,
         push_name: str,
@@ -155,7 +219,9 @@ class WhatsAppBot:
         text: str,
     ) -> None:
         await memory_manager.save_meta(
-            jid=chat_jid, push_name=push_name, is_group=is_group,
+            jid=chat_jid,
+            push_name=push_name,
+            is_group=is_group,
         )
 
         if text.startswith("/"):
@@ -179,7 +245,8 @@ class WhatsAppBot:
         auth = await check_auth(sender_jid, require_credential=False)
         if not auth.is_authorized:
             await self._send_reply(
-                client, event,
+                client,
+                event,
                 self._format_md(auth.get_response_message()),
             )
             return
@@ -188,7 +255,9 @@ class WhatsAppBot:
         history = await memory_manager.get_history(chat_jid)
 
         chat_context = ChatContext(
-            push_name=push_name, is_group=is_group, timezone_offset=7,
+            push_name=push_name,
+            is_group=is_group,
+            timezone_offset=7,
         )
 
         await self._send_typing(client, event.Info.MessageSource.Chat, True)
@@ -196,7 +265,9 @@ class WhatsAppBot:
         t_start = time.monotonic()
         try:
             response, model_used = await route_and_generate(
-                history=history, user_text=text, context=chat_context,
+                history=history,
+                user_text=text,
+                context=chat_context,
             )
         finally:
             await self._send_typing(client, event.Info.MessageSource.Chat, False)
@@ -213,18 +284,16 @@ class WhatsAppBot:
         else:
             await stats_tracker.track_response("none", False, t_elapsed_ms)
             await self._send_reply(
-                client, event,
-                "⚠️ Maaf, lagi ada gangguan teknis. Coba lagi sebentar lagi ya."
+                client,
+                event,
+                "⚠️ Maaf, lagi ada gangguan teknis. Coba lagi sebentar lagi ya.",
             )
 
-    async def _handle_command(
-        self, text: str, jid: str, push_name: str
-    ) -> str:
+    async def _handle_command(self, text: str, jid: str, push_name: str) -> str:
         cmd_lower = text.strip().lower()
 
         # Auth commands
-        if (cmd_lower.startswith("/login")
-                or cmd_lower in ("/logout", "/whoami")):
+        if cmd_lower.startswith("/login") or cmd_lower in ("/logout", "/whoami"):
             await stats_tracker.track_command(cmd_lower.split()[0])
             return await login_handler.handle(text, jid, push_name)
 
@@ -257,7 +326,8 @@ class WhatsAppBot:
             ok = await memory_manager.clear_history(jid)
             return (
                 "🗑️ Riwayat percakapan berhasil dihapus."
-                if ok else "⚠️ Gagal menghapus riwayat."
+                if ok
+                else "⚠️ Gagal menghapus riwayat."
             )
 
         if cmd == "/stats":
@@ -275,12 +345,14 @@ class WhatsAppBot:
 
     async def _cmd_ping(self) -> str:
         from app.ai.client import multi_client
+
         redis_ok = await memory_manager.ping()
         breaker_data = await multi_client.breaker_status()
         disabled_count = len(breaker_data)
         breaker_text = (
             f"⚠️ {disabled_count} model disabled"
-            if disabled_count > 0 else "✓ All models OK"
+            if disabled_count > 0
+            else "✓ All models OK"
         )
         email_status = "✓ Configured" if validate_email_server_config() else "✗ Not set"
         return (
@@ -317,13 +389,15 @@ class WhatsAppBot:
         ]
 
         if is_admin:
-            lines.extend([
-                "\n*👑 Admin:*",
-                "• `/admin add <jid> <nama>`",
-                "• `/admin remove <jid>`",
-                "• `/admin list`",
-                "• `/admin logout <jid>`",
-            ])
+            lines.extend(
+                [
+                    "\n*👑 Admin:*",
+                    "• `/admin add <jid> <nama>`",
+                    "• `/admin remove <jid>`",
+                    "• `/admin list`",
+                    "• `/admin logout <jid>`",
+                ]
+            )
 
         return "\n".join(lines)
 
@@ -332,9 +406,14 @@ class WhatsAppBot:
         cmd_lower = text.strip().lower()
 
         instant_commands = {
-            "/help", "/reset", "/whoami", "/logout",
-            "/email cancel", "/email help",
-            "/admin help", "/admin list",
+            "/help",
+            "/reset",
+            "/whoami",
+            "/logout",
+            "/email cancel",
+            "/email help",
+            "/admin help",
+            "/admin list",
         }
 
         first_two_words = " ".join(cmd_lower.split()[:2])
@@ -351,8 +430,10 @@ class WhatsAppBot:
             return msg.extendedTextMessage.text.strip()
         if msg.listResponseMessage and msg.listResponseMessage.title:
             return msg.listResponseMessage.title.strip()
-        if (msg.buttonsResponseMessage
-                and msg.buttonsResponseMessage.selectedDisplayText):
+        if (
+            msg.buttonsResponseMessage
+            and msg.buttonsResponseMessage.selectedDisplayText
+        ):
             return msg.buttonsResponseMessage.selectedDisplayText.strip()
         return ""
 
@@ -378,7 +459,7 @@ class WhatsAppBot:
         ctx = msg.extendedTextMessage.contextInfo if msg.extendedTextMessage else None
 
         if ctx:
-            for j in (ctx.mentionedJID or []):
+            for j in ctx.mentionedJID or []:
                 jid_str = j if isinstance(j, str) else f"{j.User}@{j.Server}"
                 if self._is_self_jid(jid_str):
                     return True
@@ -442,7 +523,8 @@ class WhatsAppBot:
         try:
             state = (
                 ChatPresence.CHAT_PRESENCE_COMPOSING
-                if is_typing else ChatPresence.CHAT_PRESENCE_PAUSED
+                if is_typing
+                else ChatPresence.CHAT_PRESENCE_PAUSED
             )
             await client.send_chat_presence(
                 chat_jid, state, ChatPresenceMedia.CHAT_PRESENCE_MEDIA_TEXT

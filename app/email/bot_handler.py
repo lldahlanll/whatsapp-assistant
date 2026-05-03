@@ -12,10 +12,11 @@ from typing import Optional
 
 from loguru import logger
 
-from app.auth.middleware import AuthState, check_auth
+from app.auth.middleware import AuthResult,AuthState, check_auth
 from app.auth.session_manager import session_manager
 from app.email.agent import email_agent
 from app.email.client import EmailAuthError, EmailMessage
+from app.config import settings
 
 
 class EmailCommandHandler:
@@ -56,6 +57,7 @@ class EmailCommandHandler:
             "cancel":   self._cmd_cancel,
             "send":     self._cmd_send,
             "ping":     self._cmd_ping,
+            "notify":   self._cmd_notify,
         }
 
         handler = handlers.get(sub_cmd)
@@ -269,6 +271,49 @@ class EmailCommandHandler:
 
     async def _cmd_ping(self, args: str, jid: str, auth) -> str:
         return await email_agent.ping(credential=auth.credential)
+    
+    async def _cmd_notify(self, args: str, jid: str, auth: "AuthResult") -> str:
+        """
+        /email notify on   → opt-in notifikasi email baru
+        /email notify off  → opt-out
+        /email notify      → cek status
+        """
+        from app.email.notify_manager import notify_opt_in_manager
+        from app.email.scheduler import email_scheduler
+
+        sub = args.strip().lower()
+
+        if sub == "on":
+            # Reset last_check ke sekarang agar tidak flood email lama
+            await email_scheduler.reset_last_check(jid)
+            await notify_opt_in_manager.enable(jid)
+            return (
+                "🔔 *Notifikasi email diaktifkan!*\n\n"
+                "Saya akan kirim pesan WhatsApp saat ada email baru masuk.\n"
+                f"📡 Cek setiap {settings.email_poll_interval_seconds // 60} menit.\n\n"
+                "Untuk matikan: `/email notify off`"
+            )
+
+        elif sub == "off":
+            await notify_opt_in_manager.disable(jid)
+            return (
+                "🔕 *Notifikasi email dimatikan.*\n\n"
+                "Kamu tetap bisa cek manual dengan `/email today`."
+            )
+
+        else:
+            # Status check
+            is_on = await notify_opt_in_manager.is_enabled(jid)
+            status = "🟢 *Aktif*" if is_on else "🔴 *Tidak aktif*"
+            interval_min = settings.email_poll_interval_seconds // 60
+            return (
+                f"📬 *Status Notifikasi Email*\n\n"
+                f"Status   : {status}\n"
+                f"Interval : setiap {interval_min} menit\n\n"
+                f"Perintah:\n"
+                f"  `/email notify on`  → aktifkan\n"
+                f"  `/email notify off` → matikan"
+            )
 
     def _cmd_help(self) -> str:
         return (

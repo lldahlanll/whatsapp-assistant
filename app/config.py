@@ -1,6 +1,11 @@
 # app/config.py
 from functools import lru_cache
 from typing import Optional
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Load before settings instantiation
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -102,29 +107,33 @@ class Settings(BaseSettings):
     @property
     def email_configured(self) -> bool:
         """Single-user mode: cek kredensial di .env."""
-        return all([
-            self.imap_host,
-            self.smtp_host,
-            self.email_username,
-            self.email_password,
-        ])
+        return all(
+            [
+                self.imap_host,
+                self.smtp_host,
+                self.email_username,
+                self.email_password,
+            ]
+        )
 
     @property
     def multi_user_configured(self) -> bool:
         """Multi-user mode: cek master key dan host config."""
-        return all([
-            self.multi_user_mode,
-            self.auth_master_key,
-            self.imap_host,
-            self.smtp_host,
-        ])
+        return all(
+            [
+                self.multi_user_mode,
+                self.auth_master_key,
+                self.imap_host,
+                self.smtp_host,
+            ]
+        )
 
     @property
     def configured_providers(self) -> dict[str, bool]:
         return {
-            "groq":         bool(self.groq_api_key),
-            "gemini_1":     bool(self.gemini_api_key_1),
-            "gemini_2":     bool(self.gemini_api_key_2),
+            "groq": bool(self.groq_api_key),
+            "gemini_1": bool(self.gemini_api_key_1),
+            "gemini_2": bool(self.gemini_api_key_2),
             "openrouter_1": bool(self.openrouter_api_key_1),
             "openrouter_2": bool(self.openrouter_api_key_2),
         }
