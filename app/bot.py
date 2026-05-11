@@ -26,6 +26,7 @@ from app.memory import memory_manager
 from app.utils.locks import jid_lock_manager
 from app.utils.stats import stats_tracker
 from app.email.scheduler import email_scheduler
+from app.auth.rate_limiter import ai_rate_limiter
 
 
 class WhatsAppBot:
@@ -241,15 +242,26 @@ class WhatsAppBot:
                 await self._send_reply(client, event, self._format_md(response))
             return
 
-        # ── AI conversation: butuh user authorized ────────────
-        auth = await check_auth(sender_jid, require_credential=False)
-        if not auth.is_authorized:
-            await self._send_reply(
-                client,
-                event,
-                self._format_md(auth.get_response_message()),
-            )
-            return
+        # ── AI conversation: PUBLIC tapi rate-limited ─────────
+        is_privileged = (
+            whitelist.is_admin(sender_jid)
+            or await whitelist.is_authorized(sender_jid)
+        )
+        if not is_privileged:
+            allowed, remaining = await ai_rate_limiter.check_and_consume(sender_jid)
+            if not allowed:
+                await self._send_reply(
+                    client,
+                    event,
+                    self._format_md(
+                        "⏳ *Limit tercapai*\n\n"
+                        "Maaf, kamu sudah mencapai batas chat per jam.\n"
+                        "Coba lagi nanti, atau hubungi admin untuk akses penuh."
+                    ),
+                )
+                return
+            # Optional: log untuk monitoring
+            logger.debug(f"[Bot] Anonymous chat from {sender_jid}, {remaining} left")
 
         await memory_manager.add_message(chat_jid, "user", text)
         history = await memory_manager.get_history(chat_jid)
@@ -305,6 +317,10 @@ class WhatsAppBot:
         # Email commands
         if cmd_lower.startswith("/email"):
             await stats_tracker.track_command("/email")
+
+            auth = await check_auth(jid, require_credential=True)
+            if not auth.is_authorized:
+                return auth.get_response_message()
             return await email_command_handler.handle(text, jid)
 
         cmd = cmd_lower.split()[0]
