@@ -1,27 +1,27 @@
 # WhatsApp
-neonize==0.3.16.post0
+neonize==0.3.16
 
 # HTTP & async
-httpx==0.28.1
+httpx~=0.28.1
 aiohttp==3.9.5
 
 # Config & validation
-python-dotenv==1.0.1
-pydantic==2.7.1
-pydantic-settings==2.3.4
+python-dotenv~=1.0.1
+pydantic~=2.7
+pydantic-settings~=2.3
 
 # Storage
-redis==5.0.4
+redis~=5.0
 
 # Logging
-loguru==0.7.2
+loguru~=0.7
 
 # Cryptography
-cryptography>=42.0.0
+cryptography>=42.0,<46.0
 
 # Database
-aiomysql==0.2.0
-sqlalchemy[asyncio]==2.0.31
+aiomysql~=0.2.0
+sqlalchemy[asyncio]~=2.0
 
 
 # Penjelasan tiap dependency:

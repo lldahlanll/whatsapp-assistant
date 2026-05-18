@@ -49,17 +49,17 @@ async def main() -> None:
     bot_task = asyncio.create_task(bot.start(), name="bot")
 
     # Tunggu sampai shutdown signal ATAU bot crash
+    stop_task = asyncio.create_task(stop_event.wait(), name="stop_signal")
     done, pending = await asyncio.wait(
-        [bot_task, asyncio.create_task(stop_event.wait())],
+        [bot_task, stop_task],
         return_when=asyncio.FIRST_COMPLETED,
     )
 
     # Kalau bot_task selesai duluan (crash), log error
-    if bot_task in done:
-        try:
-            bot_task.result()
-        except Exception as e:
-            logger.critical(f"[Main] Bot crashed: {e}")
+    for task in pending:
+        task.cancel()
+    # Penting: await task yang sudah di-cancel
+    await asyncio.gather(*pending, return_exceptions=True)
 
     # Cleanup
     logger.info("[Main] Cleaning up...")
