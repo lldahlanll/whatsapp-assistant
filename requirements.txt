@@ -19,6 +19,10 @@ loguru==0.7.2
 # Cryptography
 cryptography>=42.0.0
 
+# Database
+aiomysql==0.2.0
+sqlalchemy[asyncio]==2.0.31
+
 
 # Penjelasan tiap dependency:
 

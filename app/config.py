@@ -95,6 +95,18 @@ class Settings(BaseSettings):
     # Session TTL (default 8 jam)
     auth_session_ttl_seconds: int = 8 * 60 * 60
 
+    # ── Customer DB Lookup ────────────────────────────────────
+    customer_db_enabled: bool = False
+    customer_db_host: Optional[str] = None
+    customer_db_port: int = 3306
+    customer_db_user: Optional[str] = None
+    customer_db_password: Optional[str] = None
+    customer_db_name: str = "noodb"
+    customer_db_pool_size: int = 5
+    customer_db_query_timeout: float = 10.0
+
+    customer_lookup_allowed_groups: Optional[str] = None
+
     # ── Computed properties ───────────────────────────────────
     @property
     def session_db_path(self) -> str:
@@ -136,6 +148,26 @@ class Settings(BaseSettings):
             "gemini_2": bool(self.gemini_api_key_2),
             "openrouter_1": bool(self.openrouter_api_key_1),
             "openrouter_2": bool(self.openrouter_api_key_2),
+        }
+
+    @property
+    def customer_db_configured(self) -> bool:
+        """True kalau semua field DB wajib sudah terisi."""
+        return all([
+            self.customer_db_enabled,
+            self.customer_db_host,
+            self.customer_db_user,
+            self.customer_db_password,
+        ])
+
+    @property
+    def customer_lookup_groups_set(self) -> set[str]:
+        """Parse CSV group JID jadi set."""
+        if not self.customer_lookup_allowed_groups:
+            return set()
+        return {
+            g.strip() for g in self.customer_lookup_allowed_groups.split(",")
+            if g.strip()
         }
 
 

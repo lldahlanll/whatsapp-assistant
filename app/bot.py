@@ -11,6 +11,12 @@ from neonize.aioze.events import ConnectedEv, DisconnectedEv, MessageEv
 from neonize.proto.Neonize_pb2 import JID
 from neonize.utils.enum import ChatPresence, ChatPresenceMedia
 
+# === Imports tambahan dari patch ===
+from app.db.customer_db import customer_db
+from app.db.audit_log import audit_log
+from app.services.customer_lookup import customer_lookup
+# ===================================
+
 from app.ai import route_and_generate
 from app.ai.prompts import ChatContext
 from app.auth import (
@@ -49,6 +55,14 @@ class WhatsAppBot:
                     self.bot_lid = f"{me.LID.User}@{me.LID.Server}"
             except Exception as e:
                 logger.warning(f"[Bot] Could not get bot JID: {e}")
+
+            # === Tambahan inisialisasi DB dari patch ===
+            if settings.customer_db_configured:
+                try:
+                    await customer_db.init()
+                except Exception as e:
+                    logger.error(f"[Bot] Customer DB init failed: {e}")
+            # ===========================================
 
             redis_ok = await memory_manager.ping()
             email_config_ok = validate_email_server_config()
@@ -99,58 +113,59 @@ class WhatsAppBot:
 
         return notify_admin
 
-        async def _start_email_scheduler(self, client: NewAClient) -> None:
-            """Start multi-user email scheduler dengan per-user notify callback."""
-            if not settings.multi_user_configured:
-                logger.info("[Bot] multi_user_configured=False — scheduler skipped")
+    # [FIX]: Indentasi sudah dikembalikan ke level class agar tidak error
+    async def _start_email_scheduler(self, client: NewAClient) -> None:
+        """Start multi-user email scheduler dengan per-user notify callback."""
+        if not settings.multi_user_configured:
+            logger.info("[Bot] multi_user_configured=False — scheduler skipped")
+            return
+
+        async def _notify_user(
+            jid: str,
+            emails: list,
+            error: str | None = None,
+        ) -> None:
+            target = self._parse_jid(jid)
+            if not target:
+                logger.error(f"[Bot] Could not parse JID for notify: {jid}")
                 return
 
-            async def _notify_user(
-                jid: str,
-                emails: list,
-                error: str | None = None,
-            ) -> None:
-                target = self._parse_jid(jid)
-                if not target:
-                    logger.error(f"[Bot] Could not parse JID for notify: {jid}")
-                    return
-
-                if error == "auth_failed":
-                    msg = (
-                        "⚠️ *Notifikasi email dinonaktifkan*\n\n"
-                        "Password email kamu sudah tidak valid.\n"
-                        "Silakan `/logout` lalu `/login` ulang dengan password terbaru."
+            if error == "auth_failed":
+                msg = (
+                    "⚠️ *Notifikasi email dinonaktifkan*\n\n"
+                    "Password email kamu sudah tidak valid.\n"
+                    "Silakan `/logout` lalu `/login` ulang dengan password terbaru."
+                )
+            elif not emails:
+                return
+            else:
+                lines = [f"🔔 *{len(emails)} email baru!*\n"]
+                for e in emails[:5]:
+                    att = " 📎" if e.attachments else ""
+                    lines.append(
+                        f"🔵 *{e.subject[:45]}*\n"
+                        f"   Dari: {e.sender_email}{att}\n"
+                        f"   {e.received_at.strftime('%H:%M')} | UID: `{e.uid}`"
                     )
-                elif not emails:
-                    return
-                else:
-                    lines = [f"🔔 *{len(emails)} email baru!*\n"]
-                    for e in emails[:5]:
-                        att = " 📎" if e.attachments else ""
-                        lines.append(
-                            f"🔵 *{e.subject[:45]}*\n"
-                            f"   Dari: {e.sender_email}{att}\n"
-                            f"   {e.received_at.strftime('%H:%M')} | UID: `{e.uid}`"
-                        )
-                    if len(emails) > 5:
-                        lines.append(f"\n_...dan {len(emails) - 5} lainnya_")
-                    lines.append("\n💡 `/email today` untuk ringkasan lengkap")
-                    msg = "\n".join(lines)
+                if len(emails) > 5:
+                    lines.append(f"\n_...dan {len(emails) - 5} lainnya_")
+                lines.append("\n💡 `/email today` untuk ringkasan lengkap")
+                msg = "\n".join(lines)
 
-                try:
-                    await client.send_message(target, msg)
-                    logger.info(
-                        f"[Bot] ✓ Email notify sent → {jid} ({len(emails)} emails)"
-                    )
-                except Exception as e:
-                    logger.error(f"[Bot] Failed to send notify to {jid}: {e}")
+            try:
+                await client.send_message(target, msg)
+                logger.info(
+                    f"[Bot] ✓ Email notify sent → {jid} ({len(emails)} emails)"
+                )
+            except Exception as e:
+                logger.error(f"[Bot] Failed to send notify to {jid}: {e}")
 
-            email_scheduler.set_notify_callback(_notify_user)
-            await email_scheduler.start()
-            logger.info(
-                f"[Bot] ✓ Email scheduler started "
-                f"(interval={settings.email_poll_interval_seconds}s)"
-            )
+        email_scheduler.set_notify_callback(_notify_user)
+        await email_scheduler.start()
+        logger.info(
+            f"[Bot] ✓ Email scheduler started "
+            f"(interval={settings.email_poll_interval_seconds}s)"
+        )
 
     async def _handle_message_safe(self, client, event):
         try:
@@ -178,6 +193,13 @@ class WhatsAppBot:
             f"From: {sender_jid} ({push_name}) | "
             f"Text: {text[:60]}{'...' if len(text) > 60 else ''}"
         )
+
+        # --- TAMBAHAN KODE UNTUK MENDAPATKAN JID GRUP ---
+        if is_group:
+            logger.info(
+                f"[Bot] 🆔 GROUP_JID={chat_jid} | sender={sender_jid} | name={push_name}"
+            )
+        # ------------------------------------------------
 
         if await memory_manager.is_rate_limited(sender_jid):
             logger.warning(f"[Bot] ⚠️ SPAM dari {sender_jid}, ignored")
@@ -241,6 +263,26 @@ class WhatsAppBot:
             if response:
                 await self._send_reply(client, event, self._format_md(response))
             return
+
+        # === Tambahan Customer Lookup dari patch ===
+        # ── Customer Lookup (group sales only) ────────────────
+        if (
+            is_group
+            and chat_jid in settings.customer_lookup_groups_set
+            and self._should_reply_in_group(event, text)
+        ):
+            phones = customer_lookup.extract_phone_numbers(text)
+            if phones:
+                await self._handle_customer_lookup(
+                    client=client,
+                    event=event,
+                    sender_jid=sender_jid,
+                    chat_jid=chat_jid,
+                    push_name=push_name,
+                    phones=phones,
+                )
+                return  # skip AI conversation
+        # ========================================================
 
         # ── AI conversation: PUBLIC tapi rate-limited ─────────
         is_privileged = (
@@ -548,6 +590,144 @@ class WhatsAppBot:
         except Exception as e:
             logger.debug(f"[Bot] Typing indicator failed: {e}")
 
+    # === Method tambahan dari patch ===
+    def _resolve_sender_pn(self, event) -> Optional[str]:
+        """
+        Resolve sender ke format PN (@s.whatsapp.net) untuk mention.
+        WhatsApp mention butuh PN — @lid tidak akan render sebagai clickable.
+
+        Strategi:
+        1. Coba SenderAlt/PN field dari MessageSource (jika tersedia)
+        2. Fallback: return None — kita akan reply tanpa mention
+        """
+        try:
+            src = event.Info.MessageSource
+            # whatsmeow expose PN di field bernama-mana saja, coba beberapa
+            for fname in ("SenderAlt", "SenderPN", "PN"):
+                alt = getattr(src, fname, None)
+                if alt and getattr(alt, "User", None) and getattr(alt, "Server", None):
+                    user = alt.User.split(":")[0]
+                    server = alt.Server
+                    if server in ("s.whatsapp.net", "c.us"):
+                        return f"{user}@{server}"
+            # Fallback: kalau Sender sendiri sudah PN, pakai itu
+            sender_server = src.Sender.Server
+            if sender_server in ("s.whatsapp.net", "c.us"):
+                user = src.Sender.User.split(":")[0]
+                return f"{user}@{sender_server}"
+            return None
+        except Exception as e:
+            logger.debug(f"[Bot] _resolve_sender_pn failed: {e}")
+            return None
+
+    async def _send_with_mention(
+        self,
+        client,
+        chat_jid_proto: JID,
+        text: str,
+        mention_jids: list[str],
+    ) -> None:
+        """
+        Kirim pesan dengan mention yang benar-benar clickable.
+
+        neonize: send_message dengan mentionedJID di contextInfo
+        akan trigger notifikasi ke user yang di-mention.
+        """
+        try:
+            # Convert string JIDs ke proto JID
+            mentioned_protos = []
+            for jid_str in mention_jids:
+                proto = self._parse_jid(jid_str)
+                if proto:
+                    mentioned_protos.append(proto)
+
+            # neonize NewAClient.send_message support kwarg mentioned_jid
+            # Cek docs neonize Anda untuk signature persis — sintaks ini
+            # bisa beda antar versi.
+            if mentioned_protos:
+                await client.send_message(
+                    chat_jid_proto,
+                    text,
+                    mentioned_jid=mentioned_protos,
+                )
+            else:
+                await client.send_message(chat_jid_proto, text)
+        except TypeError:
+            # Fallback kalau signature beda — kirim tanpa mention
+            logger.warning(
+                "[Bot] send_message tidak support mentioned_jid kwarg, "
+                "fallback ke send tanpa mention"
+            )
+            await client.send_message(chat_jid_proto, text)
+        except Exception as e:
+            logger.error(f"[Bot] _send_with_mention failed: {e}")
+
+    async def _handle_customer_lookup(
+        self,
+        *,
+        client,
+        event,
+        sender_jid: str,
+        chat_jid: str,
+        push_name: str,
+        phones: list[str],
+    ) -> None:
+        """Handle lookup customer dari group sales. Reply ke pesan asli."""
+        if not settings.customer_db_configured:
+            return
+
+        chat_jid_proto = event.Info.MessageSource.Chat
+        await self._send_typing(client, chat_jid_proto, True)
+
+        try:
+            messages: list[str] = []
+
+            for phone_core in phones[:5]:
+                t0 = time.monotonic()
+                try:
+                    records = await customer_lookup.lookup_by_phone(phone_core)
+                    elapsed = (time.monotonic() - t0) * 1000
+
+                    logger.info(
+                        f"[CustomerLookup] {sender_jid} ({push_name}) "
+                        f"→ '{phone_core}' | {len(records)} hits | "
+                        f"{elapsed:.0f}ms"
+                    )
+
+                    # Audit fire-and-forget
+                    asyncio.create_task(
+                        audit_log.log(
+                            requester_jid=sender_jid,
+                            requester_name=push_name,
+                            group_jid=chat_jid,
+                            phone_searched=phone_core,
+                            result_count=len(records),
+                            elapsed_ms=elapsed,
+                        )
+                    )
+
+                    msg = customer_lookup.format_results(phone_core, records)
+                    messages.append(msg)
+
+                except asyncio.TimeoutError:
+                    messages.append(f"⏱️ Timeout cek `{phone_core}`")
+                except Exception as e:
+                    logger.error(f"[CustomerLookup] Error '{phone_core}': {e}")
+                    messages.append(f"⚠️ Error DB saat cek `{phone_core}`")
+
+            # Gabung jadi 1 reply (kalau banyak nomor)
+            if len(messages) == 1:
+                final_text = messages[0]
+            else:
+                final_text = "\n\n━━━━━━━━━━\n\n".join(messages)
+
+            # Reply ke pesan asli — pakai _send_reply yang sudah proven jalan
+            await self._send_reply(client, event, final_text)
+
+        finally:
+            await self._send_typing(client, chat_jid_proto, False)
+    # ==================================
+
     async def start(self) -> None:
         logger.info(f"[Bot] Starting {settings.bot_name}...")
         logger.info(f"[Bot] Mode: 🔐 Multi-user")
@@ -555,5 +735,9 @@ class WhatsAppBot:
         await self.client.connect()
         await self.client.idle()
 
+    # === Modifikasi stop() dari patch ===
     async def stop(self) -> None:
         logger.info("[Bot] Stop requested")
+        await email_scheduler.stop()
+        await customer_db.close()
+    # ====================================

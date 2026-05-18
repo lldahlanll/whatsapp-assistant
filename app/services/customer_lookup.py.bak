@@ -1,0 +1,164 @@
+# app/services/customer_lookup.py
+"""
+Service untuk lookup customer berdasarkan nomor HP.
+
+Privacy contract:
+- Hanya SELECT kolom: Kode_kustomer, No_hp, Add_user, AddDate
+- Tidak pernah SELECT kolom sensitif (Nama, Email, KTP, Password, Alamat, dll)
+- Output ke group cuma Kode_kustomer + sales yang daftar + tanggal
+"""
+import re
+from dataclasses import dataclass
+from typing import Optional
+
+from loguru import logger
+
+from app.db.customer_db import customer_db
+
+
+@dataclass(frozen=True)
+class CustomerRecord:
+    """
+    Minimal record untuk display di group sales.
+    SENGAJA tidak include Nama, Email, KTP, Alamat — privacy by design.
+    """
+    kode_kustomer: str
+    no_hp: str
+    add_user: Optional[str]      # sales yang daftarkan (username)
+    add_date: Optional[str]      # tanggal daftar
+
+
+class CustomerLookupService:
+    """Lookup customer dari DB kantor — PII-minimized."""
+
+    SAFE_COLUMNS = ["Kode_kustomer", "No_hp", "Add_user", "AddDate"]
+
+    # Regex nomor telepon Indonesia (mobile + landline)
+    # Lookbehind/ahead cegah match di tengah angka panjang (e.g. LID)
+    PHONE_REGEX = re.compile(
+        r"(?<![\w\d])"
+        r"(?:\+62|62|0)"
+        r"[\s\-.]?"
+        r"\d(?:[\s\-.]?\d){6,11}"
+        r"(?!\d)"
+    )
+
+    @staticmethod
+    def extract_phone_numbers(text: str) -> list[str]:
+        """
+        Extract nomor telepon Indonesia (mobile + landline) dari teks.
+        Returns list of normalized 'core' numbers (tanpa prefix country/0).
+        """
+        matches = CustomerLookupService.PHONE_REGEX.findall(text)
+        normalized: list[str] = []
+        seen: set[str] = set()
+
+        for raw in matches:
+            digits = re.sub(r"\D", "", raw)
+            if not digits:
+                continue
+
+            if digits.startswith("62"):
+                core = digits[2:]
+            elif digits.startswith("0"):
+                core = digits[1:]
+            else:
+                core = digits
+
+            if not (8 <= len(core) <= 13):
+                continue
+
+            if core[0] not in "2345678":
+                continue
+
+            if core not in seen:
+                seen.add(core)
+                normalized.append(core)
+
+        return normalized
+
+    async def lookup_by_phone(self, phone_core: str) -> list[CustomerRecord]:
+        """
+        Cari customer dengan no_hp suffix-match phone_core.
+        Parameterized query — aman dari SQL injection.
+        """
+        cols_sql = ", ".join(f"`{c}`" for c in self.SAFE_COLUMNS)
+        sql = (
+            f"SELECT {cols_sql} "
+            f"FROM `kustomer_temp` "
+            f"WHERE `No_hp` LIKE %s "
+            f"ORDER BY `AddDate` DESC "
+            f"LIMIT 5"
+        )
+        # Suffix match — tangkap semua format prefix di DB
+        pattern = f"%{phone_core}"
+
+        try:
+            rows = await customer_db.fetch_all(sql, (pattern,))
+        except Exception as e:
+            logger.error(f"[CustomerLookup] DB error for {phone_core}: {e}")
+            raise
+
+        records = []
+        for row in rows:
+            records.append(
+                CustomerRecord(
+                    kode_kustomer=str(row.get("Kode_kustomer", "")),
+                    no_hp=str(row.get("No_hp", "")),
+                    add_user=row.get("Add_user"),
+                    add_date=(
+                        str(row.get("AddDate")) if row.get("AddDate") else None
+                    ),
+                )
+            )
+        return records
+
+    @staticmethod
+    def _format_phone_display(core: str) -> str:
+    """Format core phone ke display 0xxx."""
+    return f"0{core}"
+
+
+    @staticmethod
+    def format_results(
+    phone: str,
+    records: list[CustomerRecord],
+    mention_jid: Optional[str] = None,
+) -> str:
+    """
+    phone: phone core (tanpa prefix). Ditampilkan dengan prefix '0'.
+    """
+    display = CustomerLookupService._format_phone_display(phone)
+    mention_tag = f"@{mention_jid.split('@')[0]}" if mention_jid else ""
+
+    if not records:
+        return (
+            f"{mention_tag} ✅ Nomor `{display}` *belum terdaftar*.\n"
+            "Aman untuk didaftarkan."
+        ).strip()
+
+    if len(records) == 1:
+        r = records[0]
+        lines = [
+            f"{mention_tag} ⚠️ Nomor `{display}` *sudah terdaftar*",
+            "",
+            f"🔖 Kode: *{r.kode_kustomer}*",
+        ]
+        if r.add_user:
+            lines.append(f"🧑‍💼 Sales: {r.add_user}")
+        if r.add_date:
+            lines.append(f"📅 Didaftarkan: {r.add_date}")
+        return "\n".join(line for line in lines if line is not None).strip()
+
+    lines = [
+        f"{mention_tag} ⚠️ Ditemukan *{len(records)}* record untuk `{display}`:",
+        "",
+    ]
+    for i, r in enumerate(records, 1):
+        sales = f" — {r.add_user}" if r.add_user else ""
+        date = f" ({r.add_date})" if r.add_date else ""
+        lines.append(f"{i}. *{r.kode_kustomer}*{sales}{date}")
+    return "\n".join(lines).strip()
+
+
+customer_lookup = CustomerLookupService()
