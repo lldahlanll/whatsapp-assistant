@@ -255,7 +255,12 @@ class WhatsAppBot:
                 await self._send_typing(client, chat_jid_proto, True)
 
             try:
-                response = await self._handle_command(text, sender_jid, push_name)
+                response = await self._handle_command(
+                    text,
+                    sender_jid=sender_jid,
+                    chat_jid=chat_jid,
+                    push_name=push_name,
+                )
             finally:
                 if needs_typing:
                     await self._send_typing(client, chat_jid_proto, False)
@@ -266,11 +271,7 @@ class WhatsAppBot:
 
         # === Tambahan Customer Lookup dari patch ===
         # ── Customer Lookup (group sales only) ────────────────
-        if (
-            is_group
-            and chat_jid in settings.customer_lookup_groups_set
-            and self._should_reply_in_group(event, text)
-        ):
+        if is_group and chat_jid in settings.customer_lookup_groups_set:
             phones = customer_lookup.extract_phone_numbers(text)
             if phones:
                 await self._handle_customer_lookup(
@@ -343,45 +344,57 @@ class WhatsAppBot:
                 "⚠️ Maaf, lagi ada gangguan teknis. Coba lagi sebentar lagi ya.",
             )
 
-    async def _handle_command(self, text: str, jid: str, push_name: str) -> str:
+    async def _handle_command(
+        self,
+        text: str,
+        *,
+        sender_jid: str,
+        chat_jid: str,
+        push_name: str,
+    ) -> str:
+        """
+        sender_jid: identitas user (auth, login, admin).
+        chat_jid  : ruang percakapan (memory AI — grup atau private).
+        """
         cmd_lower = text.strip().lower()
 
-        # Auth commands
+        # Auth commands — per user
         if cmd_lower.startswith("/login") or cmd_lower in ("/logout", "/whoami"):
             await stats_tracker.track_command(cmd_lower.split()[0])
-            return await login_handler.handle(text, jid, push_name)
+            return await login_handler.handle(text, sender_jid, push_name)
 
         # Admin commands
         if cmd_lower.startswith("/admin"):
             await stats_tracker.track_command("/admin")
-            return await admin_handler.handle(text, jid)
+            return await admin_handler.handle(text, sender_jid)
 
         # Email commands
         if cmd_lower.startswith("/email"):
             await stats_tracker.track_command("/email")
 
-            auth = await check_auth(jid, require_credential=True)
+            auth = await check_auth(sender_jid, require_credential=True)
             if not auth.is_authorized:
                 return auth.get_response_message()
-            return await email_command_handler.handle(text, jid)
+            return await email_command_handler.handle(text, sender_jid)
 
         cmd = cmd_lower.split()[0]
         await stats_tracker.track_command(cmd)
 
         # Public commands
         if cmd == "/help":
-            return self._build_help_text(jid)
+            return self._build_help_text(sender_jid)
 
         if cmd == "/ping":
             return await self._cmd_ping()
 
-        # Authenticated commands
-        auth = await check_auth(jid, require_credential=False)
+        # Authenticated commands (whitelist per user)
+        auth = await check_auth(sender_jid, require_credential=False)
         if not auth.is_authorized:
             return auth.get_response_message()
 
+        # Memory per chat (grup = satu thread bersama; private = DM)
         if cmd == "/reset":
-            ok = await memory_manager.clear_history(jid)
+            ok = await memory_manager.clear_history(chat_jid)
             return (
                 "🗑️ Riwayat percakapan berhasil dihapus."
                 if ok
@@ -389,13 +402,13 @@ class WhatsAppBot:
             )
 
         if cmd == "/stats":
-            stats = await memory_manager.get_stats(jid)
+            stats = await memory_manager.get_stats(chat_jid)
             if stats:
                 return (
                     f"📊 *Statistik Percakapan*\n"
                     f"├ Pesan tersimpan : {stats['message_count']}/{stats['max_history']}\n"
                     f"├ TTL             : {stats['ttl_hours']} jam\n"
-                    f"└ Chat ID         : ...{jid[-20:]}"
+                    f"└ Chat ID         : ...{chat_jid[-20:]}"
                 )
             return "⚠️ Gagal mengambil statistik."
 

@@ -12,7 +12,6 @@ Generate master key sekali saat setup:
     python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 """
 import json
-import os
 from dataclasses import dataclass
 from typing import Optional
 
@@ -45,21 +44,20 @@ class CredentialStore:
     def __init__(self) -> None:
         self._redis: Optional[aioredis.Redis] = None
         self._fernet: Optional[Fernet] = None
-        self._init_encryption()
 
-    def _init_encryption(self) -> None:
-        """
-        Initialize Fernet dengan master key dari env.
-        Fail fast kalau key tidak ada — security critical.
-        """
-        master_key = os.getenv("AUTH_MASTER_KEY", "").strip()
+    def _ensure_fernet(self) -> Fernet:
+        """Inisialisasi enkripsi saat pertama dipakai (bukan saat import modul)."""
+        if self._fernet is not None:
+            return self._fernet
 
+        master_key = (settings.auth_master_key or "").strip()
         if not master_key:
             raise RuntimeError(
                 "❌ AUTH_MASTER_KEY tidak diset di .env!\n"
+                "Diperlukan untuk /login dan penyimpanan kredensial email.\n"
                 "Generate dengan:\n"
-                "  python -c \"from cryptography.fernet import Fernet; "
-                "print(Fernet.generate_key().decode())\"\n"
+                '  python -c "from cryptography.fernet import Fernet; '
+                'print(Fernet.generate_key().decode())"\n'
                 "Lalu tambahkan ke .env:\n"
                 "  AUTH_MASTER_KEY=<generated_key>"
             )
@@ -67,11 +65,12 @@ class CredentialStore:
         try:
             self._fernet = Fernet(master_key.encode())
             logger.info("[CredentialStore] ✓ Encryption initialized")
+            return self._fernet
         except (ValueError, Exception) as e:
             raise RuntimeError(
                 f"❌ AUTH_MASTER_KEY tidak valid: {e}\n"
                 "Pastikan key adalah Fernet key yang valid (44 char base64)"
-            )
+            ) from e
 
     async def _get_redis(self) -> aioredis.Redis:
         if self._redis is None:
@@ -107,7 +106,7 @@ class CredentialStore:
             }
 
             plaintext = json.dumps(payload).encode("utf-8")
-            ciphertext = self._fernet.encrypt(plaintext)
+            ciphertext = self._ensure_fernet().encrypt(plaintext)
 
             await r.set(
                 self._key(jid),
@@ -136,7 +135,7 @@ class CredentialStore:
             if not ciphertext:
                 return None
 
-            plaintext = self._fernet.decrypt(ciphertext)
+            plaintext = self._ensure_fernet().decrypt(ciphertext)
             data = json.loads(plaintext.decode("utf-8"))
 
             return UserCredential(
@@ -180,5 +179,4 @@ class CredentialStore:
             return False
 
 
-# Singleton — initialized saat first import
 credential_store = CredentialStore()

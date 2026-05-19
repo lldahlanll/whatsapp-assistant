@@ -55,17 +55,26 @@ async def main() -> None:
         return_when=asyncio.FIRST_COMPLETED,
     )
 
-    # Kalau bot_task selesai duluan (crash), log error
-    for task in pending:
-        task.cancel()
-    # Penting: await task yang sudah di-cancel
-    await asyncio.gather(*pending, return_exceptions=True)
+    if bot_task in done:
+        try:
+            bot_task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.critical(f"[Main] Bot crashed: {e}")
+    else:
+        bot_task.cancel()
 
-    # Cleanup
     logger.info("[Main] Cleaning up...")
-    for task in pending:
-        task.cancel()
+    await bot.stop()
+
     health_task.cancel()
+    await asyncio.gather(
+        health.stop(),
+        bot_task,
+        health_task,
+        return_exceptions=True,
+    )
 
     await asyncio.gather(
         multi_client.close(),

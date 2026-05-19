@@ -1,5 +1,5 @@
 # WhatsApp
-neonize==0.3.16
+neonize==0.3.18.post0
 
 # HTTP & async
 httpx~=0.28.1
