@@ -1,3 +1,6 @@
+# Python: 3.12+ (asyncio.to_thread, typing modern, dll.)
+# Lokal: pyenv/asdf baca .python-version | Docker: Dockerfile python:3.12-slim
+
 # WhatsApp
 neonize==0.3.18.post0
 

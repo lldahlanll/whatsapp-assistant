@@ -11,6 +11,9 @@ ARSITEKTUR MULTI-USER (Tahap 2):
 Pattern:
   client = ZimbraEmailClient.for_user(credential)
   emails = await client.fetch_emails(...)
+
+Blocking IMAP/SMTP (imaplib/smtplib) dijalankan di thread pool lewat asyncio.to_thread
+pada setiap method public async, sehingga fetch/kirim lambat tidak membekukan event loop.
 """
 import asyncio
 import email as email_lib
@@ -219,31 +222,34 @@ class ZimbraEmailClient:
                 f"Cannot connect to SMTP {self._smtp_host}: {e}"
             ) from e
 
-    # ── Public API — Async wrappers ───────────────────────────
+    # ── Public API — Async wrappers (IMAP/SMTP sync → asyncio.to_thread) ──
 
     async def fetch_emails(
         self,
         since: Optional[datetime] = None,
         until: Optional[datetime] = None,
-        max_count: int = 20,
+        max_count: int = 10,
         folder: str = "INBOX",
         unread_only: bool = False,
     ) -> list[EmailMessage]:
         """
         Fetch emails. Raise EmailAuthError kalau credential invalid.
+
+        imaplib adalah blocking; kerja IMAP dijalankan di thread pool via
+        asyncio.to_thread agar event loop tidak freeze.
         """
         if since is None:
             since = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
-        loop = asyncio.get_event_loop()
-
         for attempt in range(self.MAX_RETRIES + 1):
             try:
-                return await loop.run_in_executor(
-                    None,
-                    lambda: self._sync_fetch_emails(
-                        since, until, max_count, folder, unread_only
-                    ),
+                return await asyncio.to_thread(
+                    self._sync_fetch_emails,
+                    since,
+                    until,
+                    max_count,
+                    folder,
+                    unread_only,
                 )
             except EmailAuthError:
                 # Auth error: jangan retry, langsung propagate
@@ -275,16 +281,15 @@ class ZimbraEmailClient:
         original_subject: Optional[str] = None,
     ) -> bool:
         """Kirim email. Raise EmailAuthError kalau credential invalid."""
-        loop = asyncio.get_event_loop()
-
         for attempt in range(self.MAX_RETRIES + 1):
             try:
-                return await loop.run_in_executor(
-                    None,
-                    lambda: self._sync_send_email(
-                        to, subject, body,
-                        reply_to_message_id, original_subject,
-                    ),
+                return await asyncio.to_thread(
+                    self._sync_send_email,
+                    to,
+                    subject,
+                    body,
+                    reply_to_message_id,
+                    original_subject,
                 )
             except EmailAuthError:
                 logger.warning(
@@ -310,12 +315,8 @@ class ZimbraEmailClient:
         uid: str,
         folder: str = "INBOX",
     ) -> Optional[EmailMessage]:
-        loop = asyncio.get_event_loop()
         try:
-            return await loop.run_in_executor(
-                None,
-                lambda: self._sync_fetch_by_uid(uid, folder),
-            )
+            return await asyncio.to_thread(self._sync_fetch_by_uid, uid, folder)
         except EmailAuthError:
             raise
         except Exception as e:
@@ -325,12 +326,8 @@ class ZimbraEmailClient:
             return None
 
     async def get_unread_count(self, folder: str = "INBOX") -> int:
-        loop = asyncio.get_event_loop()
         try:
-            return await loop.run_in_executor(
-                None,
-                lambda: self._sync_unread_count(folder),
-            )
+            return await asyncio.to_thread(self._sync_unread_count, folder)
         except EmailAuthError:
             raise
         except Exception as e:
@@ -341,11 +338,10 @@ class ZimbraEmailClient:
 
     async def test_connection(self) -> dict[str, bool]:
         """Test IMAP+SMTP login. Dipakai saat /login untuk verify credential."""
-        loop = asyncio.get_event_loop()
         results = {"imap": False, "smtp": False}
 
         try:
-            await loop.run_in_executor(None, self._sync_test_imap)
+            await asyncio.to_thread(self._sync_test_imap)
             results["imap"] = True
         except EmailAuthError:
             results["imap"] = False  # Auth gagal, return False (caller handle)
@@ -353,7 +349,7 @@ class ZimbraEmailClient:
             logger.error(f"[IMAP] Test failed: {e}")
 
         try:
-            await loop.run_in_executor(None, self._sync_test_smtp)
+            await asyncio.to_thread(self._sync_test_smtp)
             results["smtp"] = True
         except EmailAuthError:
             results["smtp"] = False
