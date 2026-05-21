@@ -44,16 +44,12 @@ class CredentialStore:
     def __init__(self) -> None:
         self._redis: Optional[aioredis.Redis] = None
         self._fernet: Optional[Fernet] = None
-        self._fernet_lock = asyncio.Lock()
 
     def _ensure_fernet(self) -> Fernet:
         """Inisialisasi enkripsi saat pertama dipakai (bukan saat import modul)."""
         if self._fernet is not None:
             return self._fernet
-        async with self._fernet_lock:
-            if self._fernet is not None:  # double-check
-                return self._fernet
-                
+
         master_key = (settings.auth_master_key or "").strip()
         if not master_key:
             raise RuntimeError(

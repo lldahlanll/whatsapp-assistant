@@ -493,20 +493,63 @@ class WhatsAppBot:
         return True
 
     @staticmethod
-    def _extract_text(event: MessageEv) -> str:
+    def _strip_bot_mentions(
+        text: str,
+        bot_number: str = "",
+        bot_lid_user: str = "",
+    ) -> str:
+        """
+        Strip mention bot sendiri (PN atau LID) dari teks.
+
+        WhatsApp render LID dengan split arbitrary, contoh:
+          '71816903155883' bisa muncul sebagai '@+7 1816903155883'
+        Pattern murni regex sulit handle ini, jadi pakai 2-step:
+        1. Tangkap kandidat broadly (@ + apa saja yang seperti digit)
+        2. Check digit-only-nya match bot ID atau tidak
+        """
+        if not text:
+            return text
+
+        bot_ids = [bid for bid in [bot_number, bot_lid_user] if bid]
+        if not bot_ids:
+            return text
+
+        pattern = re.compile(r"@[+\d\s]+")
+
+        def _replace_if_bot(match):
+            candidate = match.group(0)
+            digits = re.sub(r"\D", "", candidate)
+            if not digits:
+                return candidate
+            for bid in bot_ids:
+                if digits == bid or digits.endswith(bid) or bid.endswith(digits):
+                    return ""
+            return candidate
+
+        cleaned = pattern.sub(_replace_if_bot, text)
+        cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+        return cleaned
+
+    def _extract_text(self, event: MessageEv) -> str:
         msg = event.Message
+        raw = ""
         if msg.conversation:
-            return msg.conversation.strip()
-        if msg.extendedTextMessage and msg.extendedTextMessage.text:
-            return msg.extendedTextMessage.text.strip()
-        if msg.listResponseMessage and msg.listResponseMessage.title:
-            return msg.listResponseMessage.title.strip()
-        if (
+            raw = msg.conversation.strip()
+        elif msg.extendedTextMessage and msg.extendedTextMessage.text:
+            raw = msg.extendedTextMessage.text.strip()
+        elif msg.listResponseMessage and msg.listResponseMessage.title:
+            raw = msg.listResponseMessage.title.strip()
+        elif (
             msg.buttonsResponseMessage
             and msg.buttonsResponseMessage.selectedDisplayText
         ):
-            return msg.buttonsResponseMessage.selectedDisplayText.strip()
-        return ""
+            raw = msg.buttonsResponseMessage.selectedDisplayText.strip()
+        else:
+            return ""
+        bot_lid_user = (
+            self.bot_lid.split("@")[0] if self.bot_lid else ""
+        )
+        return self._strip_bot_mentions(raw, self.bot_number, bot_lid_user)
 
     def _is_self_jid(self, jid_str: str) -> bool:
         if not jid_str:
