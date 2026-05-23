@@ -1,28 +1,14 @@
 # app/email/client.py
-"""
-Zimbra Email Client — IMAP (baca) + SMTP (kirim).
 
-ARSITEKTUR MULTI-USER (Tahap 2):
-- Tidak ada singleton global lagi
-- Setiap call butuh credential (UserCredential) dari auth layer
-- Server config (host, port) tetap dari .env (shared semua user)
-- Username & password per-user dari CredentialStore
-
-Pattern:
-  client = ZimbraEmailClient.for_user(credential)
-  emails = await client.fetch_emails(...)
-
-Blocking IMAP/SMTP (imaplib/smtplib) dijalankan di thread pool lewat asyncio.to_thread
-pada setiap method public async, sehingga fetch/kirim lambat tidak membekukan event loop.
-"""
 import asyncio
+import concurrent.futures
 import email as email_lib
 import imaplib
 import re
 import smtplib
 import ssl
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from email.header import decode_header
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -33,6 +19,52 @@ from loguru import logger
 
 from app.auth.credential_store import UserCredential
 from app.config import settings
+
+
+_IMAP_MONTHS = (
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+)
+
+_EMAIL_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=10,
+    thread_name_prefix="email-io",
+)
+
+
+def imap_date(dt: datetime) -> str:
+    """Tanggal IMAP (bahasa Inggris) — %b locale-aware bisa salah di server ID."""
+    return f"{dt.day:02d}-{_IMAP_MONTHS[dt.month - 1]}-{dt.year}"
+
+
+def local_email_now() -> datetime:
+    """Waktu 'lokal' email (naive) menurut email_timezone_offset di settings."""
+    tz = timezone(timedelta(hours=settings.email_timezone_offset))
+    return datetime.now(tz).replace(tzinfo=None)
+
+
+def local_day_bounds(
+    day: Optional[datetime] = None,
+) -> tuple[datetime, datetime]:
+    """Awal dan akhir hari kalender di zona email (mis. WIB)."""
+    d = day or local_email_now()
+    start = d.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start.replace(hour=23, minute=59, second=59)
+    return start, end
+
+
+def to_local_email_time(dt: datetime) -> datetime:
+    """Normalisasi timestamp email ke zona settings (untuk filter hari ini)."""
+    if dt.tzinfo is not None:
+        tz = timezone(timedelta(hours=settings.email_timezone_offset))
+        return dt.astimezone(tz).replace(tzinfo=None)
+    return dt
+
+
+async def _run_email_io(fn, /, *args):
+    """Jalankan blocking IMAP/SMTP di pool terpisah (tidak memakan default executor)."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_EMAIL_EXECUTOR, fn, *args)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -222,7 +254,7 @@ class ZimbraEmailClient:
                 f"Cannot connect to SMTP {self._smtp_host}: {e}"
             ) from e
 
-    # ── Public API — Async wrappers (IMAP/SMTP sync → asyncio.to_thread) ──
+    # ── Public API — Async wrappers (IMAP/SMTP sync → dedicated thread pool) ──
 
     async def fetch_emails(
         self,
@@ -235,15 +267,15 @@ class ZimbraEmailClient:
         """
         Fetch emails. Raise EmailAuthError kalau credential invalid.
 
-        imaplib adalah blocking; kerja IMAP dijalankan di thread pool via
-        asyncio.to_thread agar event loop tidak freeze.
+        imaplib adalah blocking; kerja IMAP dijalankan di _EMAIL_EXECUTOR
+        agar event loop tidak freeze dan tidak memenuhi default thread pool.
         """
         if since is None:
-            since = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            since, _ = local_day_bounds()
 
         for attempt in range(self.MAX_RETRIES + 1):
             try:
-                return await asyncio.to_thread(
+                return await _run_email_io(
                     self._sync_fetch_emails,
                     since,
                     until,
@@ -283,7 +315,7 @@ class ZimbraEmailClient:
         """Kirim email. Raise EmailAuthError kalau credential invalid."""
         for attempt in range(self.MAX_RETRIES + 1):
             try:
-                return await asyncio.to_thread(
+                return await _run_email_io(
                     self._sync_send_email,
                     to,
                     subject,
@@ -316,7 +348,7 @@ class ZimbraEmailClient:
         folder: str = "INBOX",
     ) -> Optional[EmailMessage]:
         try:
-            return await asyncio.to_thread(self._sync_fetch_by_uid, uid, folder)
+            return await _run_email_io(self._sync_fetch_by_uid, uid, folder)
         except EmailAuthError:
             raise
         except Exception as e:
@@ -327,7 +359,7 @@ class ZimbraEmailClient:
 
     async def get_unread_count(self, folder: str = "INBOX") -> int:
         try:
-            return await asyncio.to_thread(self._sync_unread_count, folder)
+            return await _run_email_io(self._sync_unread_count, folder)
         except EmailAuthError:
             raise
         except Exception as e:
@@ -341,7 +373,7 @@ class ZimbraEmailClient:
         results = {"imap": False, "smtp": False}
 
         try:
-            await asyncio.to_thread(self._sync_test_imap)
+            await _run_email_io(self._sync_test_imap)
             results["imap"] = True
         except EmailAuthError:
             results["imap"] = False  # Auth gagal, return False (caller handle)
@@ -349,7 +381,7 @@ class ZimbraEmailClient:
             logger.error(f"[IMAP] Test failed: {e}")
 
         try:
-            await asyncio.to_thread(self._sync_test_smtp)
+            await _run_email_io(self._sync_test_smtp)
             results["smtp"] = True
         except EmailAuthError:
             results["smtp"] = False
@@ -357,6 +389,34 @@ class ZimbraEmailClient:
             logger.error(f"[SMTP] Test failed: {e}")
 
         return results
+
+    @staticmethod
+    def _select_mailbox(conn: imaplib.IMAP4_SSL, folder: str) -> None:
+        for mailbox in (folder, f'"{folder}"'):
+            status, _ = conn.select(mailbox, readonly=True)
+            if status == "OK":
+                return
+        raise EmailConnectionError(f"Cannot select IMAP folder: {folder}")
+
+    @staticmethod
+    def _imap_uid_search(conn: imaplib.IMAP4_SSL, criteria: list[str]) -> list[bytes]:
+        typ, data = conn.uid("SEARCH", None, *criteria)
+        if typ != "OK" or not data or not data[0]:
+            return []
+        return data[0].split()
+
+    @staticmethod
+    def _message_in_range(
+        msg: EmailMessage,
+        since: datetime,
+        until: Optional[datetime],
+    ) -> bool:
+        t = to_local_email_time(msg.received_at)
+        if t < since:
+            return False
+        if until is not None and t > until:
+            return False
+        return True
 
     # ── Sync implementations (di thread pool) ─────────────────
 
@@ -370,42 +430,73 @@ class ZimbraEmailClient:
     ) -> list[EmailMessage]:
         conn = self._connect_imap()
         try:
-            conn.select(f'"{folder}"', readonly=True)
+            self._select_mailbox(conn, folder)
 
-            since_str = since.strftime("%d-%b-%Y")
-            criteria = [f'SINCE "{since_str}"']
+            # IMAP SINCE = internal date; buffer 1 hari lalu filter pakai Date header
+            imap_since = since - timedelta(days=1)
+            criteria: list[str] = ["SINCE", imap_date(imap_since)]
 
-            if until:
-                until_str = until.strftime("%d-%b-%Y")
-                criteria.append(f'BEFORE "{until_str}"')
+            if until is not None:
+                before_day = until.date() + timedelta(days=1)
+                criteria.extend(
+                    [
+                        "BEFORE",
+                        imap_date(
+                            datetime(
+                                before_day.year, before_day.month, before_day.day
+                            )
+                        ),
+                    ]
+                )
 
             if unread_only:
                 criteria.append("UNSEEN")
 
-            search_query = " ".join(criteria)
-            _, data = conn.search(None, search_query)
+            uids = self._imap_uid_search(conn, criteria)
+            search_label = " ".join(criteria)
 
-            uids = data[0].split() if data[0] else []
+            if not uids:
+                # Fallback: rentang lebih lebar, tetap filter tanggal di aplikasi
+                fallback_since = since - timedelta(days=14)
+                fb_criteria: list[str] = ["SINCE", imap_date(fallback_since)]
+                if unread_only:
+                    fb_criteria.append("UNSEEN")
+                uids = self._imap_uid_search(conn, fb_criteria)
+                search_label = f"fallback: {' '.join(fb_criteria)}"
+
             if not uids:
                 logger.info(
-                    f"[IMAP/{self._credential.email}] No emails for: {search_query}"
+                    f"[IMAP/{self._credential.email}] No emails for: {search_label} "
+                    f"(filter since={since:%Y-%m-%d %H:%M}"
+                    f"{f' until={until:%Y-%m-%d %H:%M}' if until else ''})"
                 )
                 return []
 
-            uids_to_fetch = uids[-max_count:][::-1]
+            # Ambil lebih banyak kandidat; sisakan yang lolos filter tanggal lokal
+            uids_to_fetch = uids[-(max_count * 5) :][::-1]
             logger.info(
-                f"[IMAP/{self._credential.email}] Found {len(uids)}, fetching {len(uids_to_fetch)}"
+                f"[IMAP/{self._credential.email}] UID search {len(uids)} hit, "
+                f"fetching up to {len(uids_to_fetch)} ({search_label})"
             )
 
-            messages = []
+            messages: list[EmailMessage] = []
             for uid in uids_to_fetch:
                 try:
-                    msg = self._fetch_and_parse(conn, uid)
-                    if msg:
+                    msg = self._fetch_and_parse_uid(conn, uid)
+                    if msg and self._message_in_range(msg, since, until):
                         messages.append(msg)
+                    if len(messages) >= max_count:
+                        break
                 except Exception as e:
                     logger.warning(f"[IMAP] Parse failed UID {uid}: {e}")
                     continue
+
+            if not messages and uids:
+                logger.warning(
+                    f"[IMAP/{self._credential.email}] {len(uids)} UID(s) from server "
+                    f"but 0 passed date filter since={since:%Y-%m-%d %H:%M}"
+                    f"{f' until={until:%Y-%m-%d %H:%M}' if until else ''}"
+                )
 
             return messages
         finally:
@@ -417,20 +508,20 @@ class ZimbraEmailClient:
     def _sync_fetch_by_uid(self, uid: str, folder: str) -> Optional[EmailMessage]:
         conn = self._connect_imap()
         try:
-            conn.select(f'"{folder}"', readonly=True)
-            return self._fetch_and_parse(conn, uid.encode())
+            self._select_mailbox(conn, folder)
+            return self._fetch_and_parse_uid(conn, uid.encode())
         finally:
             try:
                 conn.logout()
             except Exception:
                 pass
 
-    def _fetch_and_parse(
+    def _fetch_and_parse_uid(
         self,
         conn: imaplib.IMAP4_SSL,
         uid: bytes,
     ) -> Optional[EmailMessage]:
-        _, msg_data = conn.fetch(uid, "(RFC822 FLAGS)")
+        _, msg_data = conn.uid("FETCH", uid, "(RFC822 FLAGS)")
         if not msg_data or msg_data[0] is None:
             return None
 
@@ -456,7 +547,7 @@ class ZimbraEmailClient:
         date_str = msg.get("Date", "")
         if date_str:
             try:
-                received_at = parsedate_to_datetime(date_str).replace(tzinfo=None)
+                received_at = to_local_email_time(parsedate_to_datetime(date_str))
             except Exception:
                 pass
 
@@ -520,9 +611,8 @@ class ZimbraEmailClient:
     def _sync_unread_count(self, folder: str) -> int:
         conn = self._connect_imap()
         try:
-            conn.select(f'"{folder}"', readonly=True)
-            _, data = conn.search(None, "UNSEEN")
-            uids = data[0].split() if data[0] else []
+            self._select_mailbox(conn, folder)
+            uids = self._imap_uid_search(conn, ["UNSEEN"])
             return len(uids)
         finally:
             try:

@@ -106,6 +106,7 @@ class SessionManager:
             )
         except Exception as e:
             logger.error(f"[SessionManager] create failed for {jid}: {e}")
+            raise
 
         return session
 
@@ -155,12 +156,10 @@ class SessionManager:
 
     async def list_active(self) -> list[Session]:
         """List semua active session (untuk admin command)."""
+        sessions = []
         try:
             r = await self._get_redis()
-            keys = await r.keys(f"{self.KEY_PREFIX}*")
-
-            sessions = []
-            for key in keys:
+            async for key in r.scan_iter(match=f"{self.KEY_PREFIX}*", count=100):
                 raw = await r.get(key)
                 if raw:
                     try:

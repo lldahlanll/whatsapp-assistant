@@ -13,7 +13,7 @@ Error classification:
 import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Optional, TYPE_CHECKING
 
@@ -52,7 +52,7 @@ class FailureType(Enum):
 
 def _seconds_until_midnight() -> int:
     """Hitung detik sampai tengah malam UTC (quota reset Gemini)."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     midnight = (now + timedelta(days=1)).replace(
         hour=0, minute=0, second=0, microsecond=0
     )

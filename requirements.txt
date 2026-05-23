@@ -5,7 +5,13 @@
 
 # ── Core runtime ──────────────────────────────────────────
 # WhatsApp client
+# CATATAN: neonize 0.3.18 ship proto stub gencode 7.34.x →
+# WAJIB protobuf runtime >= 7.34.1 (lihat pin protobuf di bawah)
 neonize==0.3.18.post0
+
+# Protobuf — pin eksplisit agar tidak ke-downgrade oleh resolver.
+# neonize butuh runtime >= gencode-nya (7.34.x).
+protobuf>=7.34.1,<8
 
 # HTTP client (async) — untuk LLM API calls, web fetch, dll
 httpx~=0.28
@@ -20,6 +26,9 @@ pydantic-settings~=2.6
 redis~=5.2
 
 # ── Database (customer lookup) ────────────────────────────
+# aiomysql perlu PyMySQL sebagai dependency (auto-install).
+# Tidak perlu sqlalchemy karena kode Anda pakai aiomysql langsung
+# (aiomysql.create_pool + raw SQL parameterized), bukan ORM.
 aiomysql~=0.2.0
 
 # ── Security ──────────────────────────────────────────────
@@ -30,5 +39,4 @@ cryptography>=42.0,<46.0
 loguru~=0.7
 
 # ── Web server (untuk /health endpoint) ───────────────────
-# Kalau Anda pakai aiohttp untuk healthcheck server di health.py
 aiohttp~=3.11

@@ -7,7 +7,7 @@ Filosofi:
 - Versioned → mudah rollback kalau prompt baru lebih jelek
 """
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from app.ai.models import ModelTier
@@ -98,7 +98,7 @@ class ChatContext:
 
     def to_prompt(self) -> str:
         # Greeting context berdasarkan jam lokal
-        hour = (datetime.utcnow().hour + self.timezone_offset) % 24
+        hour = (datetime.now(timezone.utc).hour + self.timezone_offset) % 24
         if 5 <= hour < 11:
             time_context = "pagi"
         elif 11 <= hour < 15:

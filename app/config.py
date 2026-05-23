@@ -78,6 +78,8 @@ class Settings(BaseSettings):
     email_sender_name: Optional[str] = None
     email_notify_jid: Optional[str] = None
     email_poll_interval_seconds: int = 300
+    # Zona waktu untuk filter "hari ini" / summary (default WIB = UTC+7)
+    email_timezone_offset: int = 7
 
     # ── Multi-User Auth ───────────────────────────────────────
     # Master key untuk encrypt password — WAJIB untuk multi-user mode

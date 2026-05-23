@@ -99,8 +99,9 @@ class MultiUserEmailScheduler:
                 return datetime.fromtimestamp(float(ts))
         except Exception as e:
             logger.warning(f"[Scheduler] Redis get last_check failed for {jid}: {e}")
-        # Default: top of current hour (hindari email flood saat pertama opt-in)
-        return datetime.now().replace(minute=0, second=0, microsecond=0)
+        # Default: sekarang — jangan proses email lama (restart / TTL expired)
+        # User bisa /email today untuk catch-up manual
+        return datetime.now()
 
     async def _set_last_check(self, jid: str, dt: datetime) -> None:
         try:
@@ -165,10 +166,7 @@ class MultiUserEmailScheduler:
         now = datetime.now()
 
         try:
-            client = ZimbraEmailClient(
-                username=credential.email_username,
-                password=credential.email_password,
-            )
+            client = ZimbraEmailClient.for_user(credential)
             new_emails = await client.fetch_emails(
                 since=last_check,
                 unread_only=True,

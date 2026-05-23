@@ -3,7 +3,8 @@ import asyncio
 import re
 import time
 import traceback
-from typing import Optional
+from collections.abc import Coroutine
+from typing import Any, Optional
 
 from loguru import logger
 from neonize.aioze.client import NewAClient
@@ -42,7 +43,15 @@ class WhatsAppBot:
         self.bot_lid: str = ""
         self.bot_number: str = ""
         self._stop_event = asyncio.Event()
+        self._background_tasks: set[asyncio.Task[Any]] = set()
+        self._message_semaphore = asyncio.Semaphore(50)  # max 50 concurrent handlers
         self._register_events()
+
+    def _spawn_background(self, coro: Coroutine[Any, Any, Any]) -> None:
+        """Jalankan coroutine di background; simpan ref agar GC tidak cancel task."""
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     def _register_events(self) -> None:
         @self.client.event(ConnectedEv)
@@ -92,7 +101,11 @@ class WhatsAppBot:
 
         @self.client.event(MessageEv)
         async def on_message(client: NewAClient, event: MessageEv):
-            asyncio.create_task(self._handle_message_safe(client, event))
+            task = asyncio.create_task(
+                self._handle_message_with_semaphore(client, event)
+            )
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
     def _make_admin_notify_callback(self, client: NewAClient):
         async def notify_admin(admin_jid: str, push_name: str, message: str):
@@ -167,6 +180,11 @@ class WhatsAppBot:
             f"(interval={settings.email_poll_interval_seconds}s)"
         )
 
+    async def _handle_message_with_semaphore(self, client, event):
+        """Wrapper that enforces concurrent message handler limit."""
+        async with self._message_semaphore:
+            await self._handle_message_safe(client, event)
+
     async def _handle_message_safe(self, client, event):
         try:
             await self._handle_message(client, event)
@@ -207,7 +225,10 @@ class WhatsAppBot:
 
         await stats_tracker.track_message_received(chat_jid, is_group)
 
-        if is_group and not self._should_reply_in_group(event, text):
+        # Di grup: command slash selalu diproses; chat biasa butuh @mention bot
+        if is_group and not text.startswith("/") and not self._should_reply_in_group(
+            event, text
+        ):
             return
 
         # Per-USER lock (sender_jid) untuk multi-user isolation
@@ -648,14 +669,6 @@ class WhatsAppBot:
 
     # === Method tambahan dari patch ===
     def _resolve_sender_pn(self, event) -> Optional[str]:
-        """
-        Resolve sender ke format PN (@s.whatsapp.net) untuk mention.
-        WhatsApp mention butuh PN — @lid tidak akan render sebagai clickable.
-
-        Strategi:
-        1. Coba SenderAlt/PN field dari MessageSource (jika tersedia)
-        2. Fallback: return None — kita akan reply tanpa mention
-        """
         try:
             src = event.Info.MessageSource
             # whatsmeow expose PN di field bernama-mana saja, coba beberapa
@@ -750,8 +763,7 @@ class WhatsAppBot:
                         f"{elapsed:.0f}ms"
                     )
 
-                    # Audit fire-and-forget
-                    asyncio.create_task(
+                    self._spawn_background(
                         audit_log.log(
                             requester_jid=sender_jid,
                             requester_name=push_name,

@@ -15,7 +15,7 @@ from loguru import logger
 from app.auth.middleware import AuthResult,AuthState, check_auth
 from app.auth.session_manager import session_manager
 from app.email.agent import email_agent
-from app.email.client import EmailAuthError, EmailMessage
+from app.email.client import EmailAuthError, EmailMessage, local_day_bounds, local_email_now
 from app.config import settings
 
 
@@ -86,10 +86,11 @@ class EmailCommandHandler:
     # ── Commands ──────────────────────────────────────────────
 
     async def _cmd_today(self, args: str, jid: str, auth) -> str:
-        since = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        since, until = local_day_bounds()
         return await email_agent.fetch_and_summarize(
             credential=auth.credential,
             since=since,
+            until=until,
             date_label="hari ini",
         )
 
@@ -123,11 +124,13 @@ class EmailCommandHandler:
             return "⚠️ Format tanggal salah. Gunakan: `YYYY-MM-DD`"
 
     async def _cmd_unread(self, args: str, jid: str, auth) -> str:
-        since = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        # UNSEEN tidak dibatasi "hari ini" — unread kemarin/tahun lalu tetap relevan
+        since = local_email_now() - timedelta(days=30)
+        since = since.replace(hour=0, minute=0, second=0, microsecond=0)
         return await email_agent.fetch_and_summarize(
             credential=auth.credential,
             since=since,
-            date_label="hari ini (belum dibaca)",
+            date_label="belum dibaca (30 hari terakhir)",
             unread_only=True,
         )
 

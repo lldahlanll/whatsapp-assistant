@@ -168,8 +168,17 @@ class LoginHandler:
                 "Silakan login ulang: `/login email password`"
             )
 
-        # Buat session baru
-        session = await session_manager.create(jid, existing_cred.email)
+        try:
+            session = await session_manager.create(jid, existing_cred.email)
+        except Exception as e:
+            logger.error(
+                f"[LoginHandler] Quick re-login session create failed for {jid}: {e}"
+            )
+            return (
+                "⚠️ *Gagal membuat session*\n\n"
+                "Credential masih valid, tapi Redis sementara bermasalah.\n"
+                "Coba lagi: `/login` (tanpa argumen)"
+            )
 
         logger.info(
             f"[LoginHandler] ✓ Quick re-login: {jid} → {existing_cred.email}"
@@ -229,12 +238,24 @@ class LoginHandler:
             )
 
         # ── Simpan credential terenkripsi ─────────────────────
-        saved = await credential_store.save(jid, temp_cred)
-        if not saved:
+        cred_saved = await credential_store.save(jid, temp_cred)
+        if not cred_saved:
             return "⚠️ Gagal simpan kredensial. Coba lagi nanti."
 
-        # ── Buat session ──────────────────────────────────────
-        session = await session_manager.create(jid, email)
+        # ── Buat session (rollback credential kalau gagal) ───
+        try:
+            session = await session_manager.create(jid, email)
+        except Exception as e:
+            await credential_store.delete(jid)
+            logger.error(
+                f"[LoginHandler] Session create failed, rolled back credential "
+                f"for {jid}: {e}"
+            )
+            return (
+                "⚠️ *Gagal membuat session*\n\n"
+                "Kredensial tidak disimpan (rollback).\n"
+                "Coba lagi sebentar: `/login email password`"
+            )
 
         logger.info(
             f"[LoginHandler] ✓ Login success: {jid} → {email} "

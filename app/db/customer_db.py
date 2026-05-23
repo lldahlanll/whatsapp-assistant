@@ -4,7 +4,7 @@ Read-only async connection pool untuk database customer kantor.
 
 Design rules:
 - Pool size kecil (5) — query jarang, no need over-provision
-- Statement timeout di-enforce per-connection
+- Statement timeout di-enforce per-connection di sisi server (MAX_EXECUTION_TIME)
 - Semua query parameterized — TIDAK ada string concat ke SQL
 - User DB read-only di level MySQL (defense in depth)
 """
@@ -70,16 +70,36 @@ class CustomerDB:
     @asynccontextmanager
     async def cursor(self) -> AsyncIterator[aiomysql.DictCursor]:
         """
-        Acquire connection + DictCursor.
-        Statement timeout di-set per-connection di MySQL (MAX_EXECUTION_TIME hint).
+        Acquire connection + DictCursor dengan server-side statement timeout.
+
+        MAX_EXECUTION_TIME (MySQL 5.7.8+) membatasi durasi SELECT di SISI SERVER.
+        Ini berbeda dari asyncio.wait_for yang hanya membatalkan di sisi Python —
+        tanpa ini, query lambat tetap jalan di MySQL meski Python sudah timeout.
         """
         if self._pool is None:
             await self.init()
         if self._pool is None:
             raise RuntimeError("CustomerDB pool not available")
 
+        # Konversi detik → milidetik untuk MAX_EXECUTION_TIME
+        timeout_ms = int(settings.customer_db_query_timeout * 1000)
+
         async with self._pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
+                # Set per-session. autocommit=True jadi langsung efektif.
+                # Hanya berlaku untuk SELECT (sesuai desain read-only kita).
+                try:
+                    await cur.execute(
+                        "SET SESSION MAX_EXECUTION_TIME = %s", (timeout_ms,)
+                    )
+                except aiomysql.Error as e:
+                    # MariaDB tidak punya MAX_EXECUTION_TIME (pakai max_statement_time
+                    # dalam detik). Kalau gagal, log tapi jangan crash —
+                    # asyncio.wait_for di fetch_all tetap jadi safety net.
+                    logger.warning(
+                        f"[CustomerDB] Gagal set MAX_EXECUTION_TIME "
+                        f"(server mungkin MariaDB?): {e}"
+                    )
                 yield cur
 
     async def fetch_all(
@@ -91,19 +111,22 @@ class CustomerDB:
         """
         Run parameterized SELECT, return list of dicts.
 
+        Dua lapis proteksi timeout:
+        1. MAX_EXECUTION_TIME (server-side) — hentikan query di MySQL
+        2. asyncio.wait_for (client-side) — bebaskan coroutine Python
+
         Args:
             sql: query dengan %s placeholders (aiomysql convention)
             params: tuple/dict untuk binding
-            timeout: override default timeout (detik)
+            timeout: override default timeout (detik) untuk lapis client-side
         """
         timeout = timeout or settings.customer_db_query_timeout
 
         try:
             async with self.cursor() as cur:
-                # Wrap dengan asyncio.wait_for untuk hard timeout
                 await asyncio.wait_for(
                     cur.execute(sql, params),
-                    timeout=timeout,
+                    timeout=timeout + 1.0,  # beri server-side timeout kesempatan duluan
                 )
                 rows = await cur.fetchall()
                 logger.debug(f"[CustomerDB] Query OK | rows={len(rows)}")

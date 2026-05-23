@@ -27,6 +27,7 @@ from app.email.client import (
     EmailAuthError,
     EmailMessage,
     ZimbraEmailClient,
+    local_day_bounds,
 )
 
 
@@ -125,9 +126,7 @@ Tulis HANYA isi body email, mulai dari salam pembuka.\
             EmailAuthError: kalau credential invalid
         """
         if since is None:
-            since = datetime.now().replace(
-                hour=0, minute=0, second=0, microsecond=0
-            )
+            since, _ = local_day_bounds()
 
         client = ZimbraEmailClient.for_user(credential)
 
@@ -145,7 +144,13 @@ Tulis HANYA isi body email, mulai dari salam pembuka.\
 
         if not emails:
             qualifier = "belum dibaca " if unread_only else ""
-            return f"📭 Tidak ada email {qualifier}masuk {date_label}."
+            return (
+                f"📭 Tidak ada email {qualifier}masuk {date_label}.\n\n"
+                "Kalau di webmail ada isi:\n"
+                "• Coba `/email ping` (cek unread)\n"
+                "• Coba `/email summary YYYY-MM-DD` dengan tanggal kemarin\n"
+                "• Pastikan email ada di folder *INBOX*"
+            )
 
         emails_text = self._format_emails_for_llm(emails)
         prompt = self._SUMMARIZE_PROMPT.format(
