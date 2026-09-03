@@ -1,0 +1,54 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Test & dev artifacts
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+tests/
+
+# Local development data (should use Docker volumes instead)
+storage/*.db
+storage/*.db-shm
+storage/*.db-wal
+default_session/
+logs/
+
+# Secrets — never send to Docker build context
+.env
+.env.local
+*.secret
+
+# IDE & OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Git
+.git/
+.gitignore
+
+# Docs & assets (not needed at runtime)
+docs/
+assets/
+scratch/
+scripts/
+
+# Deployment config (not needed inside container)
+deployment/
+docker-compose*.yml
+CHANGELOG.md
+CONTRIBUTING.md

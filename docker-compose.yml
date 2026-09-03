@@ -1,0 +1,52 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: whatsapp-platform
+    restart: unless-stopped
+    env_file:
+      - .env.docker
+    ports:
+      - "${API_PORT:-8077}:8077"
+    volumes:
+      # SQLite databases + WhatsApp session file (stored as /app/storage/<session>.db)
+      - app_storage:/app/storage
+      # Logs
+      - app_logs:/app/logs
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - wa_net
+
+  mysql:
+    image: mysql:8.4
+    container_name: whatsapp-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_secret}
+      MYSQL_DATABASE: ${MYSQL_DB:-customer_db}
+      MYSQL_USER: ${MYSQL_USER:-wa_user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-wa_secret}
+    ports:
+      - "3307:3306"   # exposed on 3307 to avoid conflict with local MySQL
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-root_secret}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - wa_net
+
+volumes:
+  app_storage:
+  mysql_data:
+  app_logs:
+
+networks:
+  wa_net:
+    driver: bridge

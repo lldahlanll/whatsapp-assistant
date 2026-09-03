@@ -1,0 +1,89 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "whatsapp-platform"
+version = "0.1.0"
+description = "Enterprise-grade Clean Architecture WhatsApp Automation Platform built on Neonize 0.4.3.post0"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+    { name = "Software Architect & Engineering Team" }
+]
+dependencies = [
+    "neonize==0.4.3.post0",
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.7.0",
+    "sqlalchemy>=2.0.35",
+    "alembic>=1.13.0",
+    "aiosqlite>=0.20.0",
+    "structlog>=24.4.0",
+    "segno>=1.6.0",
+    "phonenumbers>=8.13.0",
+    "greenlet>=3.5.4",
+    "pillow>=10.0.0",
+    "pymupdf>=1.23.0",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "python-multipart>=0.0.12",
+    "httpx>=0.27.0",
+    "aiomysql>=0.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=5.0.0",
+    "mypy>=1.13.0",
+    "ruff>=0.8.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/whatsapp_platform"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "S", "BLE", "PIE", "RUF", "G"]
+ignore = [
+    # G201: structlog does not have .exception(); logger.error(exc_info=True) is the correct pattern.
+    "G201",
+    # G202: same reason as G201.
+    "G202",
+    # UP042: suggests StrEnum, but our str+Enum classes are intentionally compatible with
+    # SQLAlchemy column serialization and Pydantic v2 without additional adapters.
+    "UP042",
+    # RUF001: WhatsApp text formatters intentionally include standard emoji symbols.
+    "RUF001",
+]
+
+
+[tool.ruff.lint.per-file-ignores]
+# Infrastructure adapters must catch broad Exception because Neonize/SQLAlchemy
+# raise internal errors not in our domain exception hierarchy.
+"src/whatsapp_platform/infrastructure/*" = ["BLE001", "S110"]
+# Command handlers re-raise user-visible errors; broad catch is intentional.
+"src/whatsapp_platform/features/commands/handlers/*" = ["BLE001"]
+"src/whatsapp_platform/features/commands/router.py" = ["BLE001"]
+"src/whatsapp_platform/features/messaging/handlers.py" = ["BLE001"]
+"src/whatsapp_platform/features/network/*" = ["BLE001", "S110"]
+
+"src/whatsapp_platform/features/session/*" = ["BLE001"]
+"src/whatsapp_platform/application/services/event_bus.py" = ["BLE001"]
+"src/whatsapp_platform/shared/utils/media_processor.py" = ["BLE001"]
+"src/whatsapp_platform/app.py" = ["BLE001"]
+# Tests use standard pytest assert statements, /tmp for temp files, and dummy passwords
+"tests/*" = ["S101", "S106", "S108"]
+# API routers need broad exception catches for HTTP error mapping
+"src/whatsapp_platform/presentation/api/*" = ["BLE001"]
+
