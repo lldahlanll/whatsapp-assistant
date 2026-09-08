@@ -177,3 +177,36 @@ async def test_repo_reverse_transaction_atomic(async_session_factory) -> None:
     fetched_acc = await repo.get_account_by_id(acc.id, owner_jid)
     assert fetched_acc is not None
     assert fetched_acc.balance == Decimal("500000")
+
+
+@pytest.mark.asyncio
+async def test_repo_delete_account(async_session_factory) -> None:
+    repo = SQLAlchemyFinanceRepository(async_session_factory)
+    owner_jid = "user1@s.whatsapp.net"
+
+    acc = await repo.create_account(
+        FinanceAccount(
+            id="acc-to-del",
+            owner_jid=owner_jid,
+            name="BCA",
+            account_type=AccountType.BANK,
+            currency="IDR",
+            balance=Decimal("500000"),
+            is_active=True,
+            created_at=None,  # type: ignore[arg-type]
+        )
+    )
+
+    accounts_before = await repo.get_accounts(owner_jid)
+    assert len(accounts_before) == 1
+
+    success = await repo.delete_account(acc.id, owner_jid)
+    assert success is True
+
+    accounts_after = await repo.get_accounts(owner_jid)
+    assert len(accounts_after) == 0
+
+    # Non-existent account delete
+    success_none = await repo.delete_account("non-existent-id", owner_jid)
+    assert success_none is False
+

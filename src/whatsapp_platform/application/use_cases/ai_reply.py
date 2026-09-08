@@ -31,6 +31,26 @@ _ROLE_SPOOF_PATTERN = re.compile(
     re.MULTILINE,
 )
 
+_EMOJI_PATTERN = re.compile(
+    r"[\U0001F000-\U0001FAFF"
+    r"\U00002600-\U000027BF"
+    r"\U00002300-\U000023FF"
+    r"\U00002B50-\U00002B55"
+    r"\U0000FE00-\U0000FE0F"
+    r"\U0000200D]"
+    r"+",
+    flags=re.UNICODE,
+)
+
+
+def strip_emojis(text: str) -> str:
+    """Hapus icon atau emoji dari teks balasan agar jawaban bersih dan profesional."""
+    if not text:
+        return text
+    cleaned = _EMOJI_PATTERN.sub("", text)
+    cleaned_lines = [re.sub(r"[ \t]+", " ", line).strip() for line in cleaned.splitlines()]
+    return "\n".join(cleaned_lines).strip()
+
 
 def _escape_role_spoof(text: str) -> str:
     return _ROLE_SPOOF_PATTERN.sub(lambda m: m.group(0).rstrip(":") + ":\u200b", text)
@@ -174,6 +194,7 @@ class AIReplyUseCase:
             chat_jid_str, "user", f"[{sender_label}]: {trigger_text}"
         )
         if response.text:
+            response.text = strip_emojis(response.text)
             await self._ai_service.append_to_context(
                 chat_jid_str, "assistant", response.text
             )

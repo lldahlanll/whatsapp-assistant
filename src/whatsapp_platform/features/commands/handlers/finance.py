@@ -27,46 +27,53 @@ from whatsapp_platform.features.finance.service import (
 )
 
 _HELP_TEXT = (
-    "💰 *PANDUAN PERINTAH FINANCE*\n"
+    "*PANDUAN PERINTAH FINANCE*\n"
     "━━━━━━━━━━━━━━━━━━\n"
-    "📥 *Pemasukan:*\n"
+    "*Pemasukan:*\n"
     "  `!finance masuk 5jt gaji`\n"
     "  `!finance masuk 500rb freelance`\n"
     "\n"
-    "📤 *Pengeluaran:*\n"
+    "*Pengeluaran:*\n"
     "  `!finance keluar 50rb makan siang`\n"
     "  `!finance keluar 150k bensin`\n"
     "\n"
-    "🔄 *Transfer:*\n"
+    "*Transfer:*\n"
     "  `!finance transfer 100rb BCA BRI`\n"
     "\n"
-    "🎯 *Budget / Anggaran:*\n"
+    "*Budget / Anggaran:*\n"
     "  `!finance budget` — lihat semua budget bulan ini\n"
     "  `!finance budget makan 1jt` — atur budget kategori\n"
     "  `!finance budget makan` — cek progres budget\n"
     "  `!finance budget hapus makan` — hapus budget\n"
     "\n"
-    "💰 *Saldo & Laporan:*\n"
+    "*Saldo & Laporan:*\n"
     "  `!finance saldo` — lihat semua saldo\n"
     "  `!finance riwayat [n]` — transaksi terakhir\n"
     "  `!finance laporan [bulan]` — laporan bulanan\n"
     "\n"
-    "🏦 *Rekening:*\n"
+    "*Rekening:*\n"
     "  `!finance rekening` — daftar rekening\n"
     "  `!finance rekening baru BCA bank 5jt`\n"
     "  `!finance rekening baru GoPay ewallet 200rb`\n"
-    "  _Format: baru <nama> [tipe] [saldo_awal]_\n"
+    "  `!finance rekening hapus BCA` — hapus rekening (perlu konfirmasi)\n"
+    "  _Format baru: baru <nama> [tipe] [saldo_awal]_\n"
     "  _Tipe: cash · bank · ewallet · savings · investment_\n"
     "\n"
+    "*Reset (Hapus Semua Data):*\n"
+    "  `!finance reset` — preview data yang akan dihapus\n"
+    "  `!finance reset YA` — hapus semua data (tidak bisa dibatalkan)\n"
+    "\n"
     "━━━━━━━━━━━━━━━━━━\n"
-    "💡 _Atau cukup ngobrol natural dengan Nara:_\n"
+    "_Atau cukup ngobrol natural dengan Nara:_\n"
     "  _'budget makan bulan ini 1 juta'_\n"
     "  _'berapa sisa budget makan?'_\n"
     "  _'tampilkan budget bulan ini'_\n"
     "  _'catat pengeluaran 50rb buat makan'_\n"
     "  _'berapa saldo aku sekarang?'_\n"
     "  _'laporan keuangan bulan ini'_\n"
-    "  _'buat rekening BCA dengan saldo awal 5 juta'_"
+    "  _'buat rekening BCA dengan saldo awal 5 juta'_\n"
+    "  _'hapus rekening BCA'_\n"
+    "  _'reset semua data keuangan aku'_"
 )
 
 
@@ -95,37 +102,40 @@ class FinanceCommandHandler(BaseCommandHandler):
         rest = args[1:]
 
         try:
-            if sub in ("saldo", "balance", "cek"):
-                await self._handle_saldo(ctx, owner_jid)
+            if sub in ("saldo", "balance", "kas"):
+                await self._handle_balance(ctx, owner_jid)
 
             elif sub in ("masuk", "income", "pemasukan", "in"):
                 await self._handle_income(ctx, owner_jid, rest)
 
-            elif sub in ("keluar", "expense", "pengeluaran", "out", "catat"):
+            elif sub in ("keluar", "expense", "pengeluaran", "out"):
                 await self._handle_expense(ctx, owner_jid, rest)
 
-            elif sub in ("transfer", "tf", "pindah"):
+            elif sub in ("transfer", "tf", "trf"):
                 await self._handle_transfer(ctx, owner_jid, rest)
 
-            elif sub in ("riwayat", "histori", "history", "list"):
+            elif sub in ("riwayat", "history", "transaksi", "tx"):
                 await self._handle_history(ctx, owner_jid, rest)
 
-            elif sub in ("laporan", "report", "rekap", "summary"):
+            elif sub in ("laporan", "report", "rekap"):
                 await self._handle_report(ctx, owner_jid, rest)
 
-            elif sub in ("rekening", "akun", "account"):
+            elif sub in ("rekening", "account", "rek", "acc"):
                 await self._handle_account(ctx, owner_jid, rest)
 
-            elif sub in ("kategori", "category"):
+            elif sub in ("kategori", "category", "categories", "cat"):
                 await self._handle_categories(ctx, owner_jid)
 
             elif sub in ("budget", "anggaran"):
                 await self._handle_budget(ctx, owner_jid, rest)
 
+            elif sub in ("reset", "hapus_semua", "clear_all"):
+                await self._handle_reset(ctx, owner_jid, rest)
+
             else:
                 await ctx.reply(
-                    f"❓ Sub-command `!finance {sub}` tidak dikenal.\n"
-                    "Ketik `!finance help` untuk melihat panduan."
+                    f"Sub-command `{sub}` tidak dikenali.\n"
+                    "Ketik `!finance help` untuk melihat panduan penggunaan."
                 )
 
         except FinanceServiceError as exc:
@@ -135,7 +145,7 @@ class FinanceCommandHandler(BaseCommandHandler):
 
     # ── Sub-command handlers ──────────────────────────────────────────────────
 
-    async def _handle_saldo(self, ctx: CommandContext, owner_jid: str) -> None:
+    async def _handle_balance(self, ctx: CommandContext, owner_jid: str) -> None:
         data = await self._svc.get_total_balance(owner_jid)
         await ctx.reply(format_balance(data))
 
@@ -143,13 +153,13 @@ class FinanceCommandHandler(BaseCommandHandler):
         self, ctx: CommandContext, owner_jid: str, rest: list[str]
     ) -> None:
         if not rest:
-            await ctx.reply("❌ Contoh: `!finance masuk 5jt gaji bulan ini`")
+            await ctx.reply("Contoh: `!finance masuk 5jt gaji bulan ini`")
             return
         text = " ".join(rest)
         amount = parse_amount_from_text(text)
         if not amount or amount <= 0:
             await ctx.reply(
-                "❌ Jumlah tidak terbaca. Contoh: `!finance masuk 5jt gaji`"
+                "Jumlah tidak terbaca. Contoh: `!finance masuk 5jt gaji`"
             )
             return
         description = parse_description_without_amount(text) or None
@@ -164,13 +174,13 @@ class FinanceCommandHandler(BaseCommandHandler):
         self, ctx: CommandContext, owner_jid: str, rest: list[str]
     ) -> None:
         if not rest:
-            await ctx.reply("❌ Contoh: `!finance keluar 50rb makan siang`")
+            await ctx.reply("Contoh: `!finance keluar 50rb makan siang`")
             return
         text = " ".join(rest)
         amount = parse_amount_from_text(text)
         if not amount or amount <= 0:
             await ctx.reply(
-                "❌ Jumlah tidak terbaca. Contoh: `!finance keluar 50rb makan`"
+                "Jumlah tidak terbaca. Contoh: `!finance keluar 50rb makan`"
             )
             return
         description = parse_description_without_amount(text) or None
@@ -186,14 +196,14 @@ class FinanceCommandHandler(BaseCommandHandler):
     ) -> None:
         if len(rest) < 3:
             await ctx.reply(
-                "❌ Format: `!finance transfer <jumlah> <dari> <ke>`\n"
+                "Format: `!finance transfer <jumlah> <dari> <ke>`\n"
                 "Contoh: `!finance transfer 500rb BCA BRI`"
             )
             return
         text = " ".join(rest)
         amount = parse_amount_from_text(text)
         if not amount or amount <= 0:
-            await ctx.reply("❌ Jumlah tidak terbaca.")
+            await ctx.reply("Jumlah tidak terbaca.")
             return
 
         from_name = rest[-2]
@@ -204,13 +214,13 @@ class FinanceCommandHandler(BaseCommandHandler):
 
         if not from_acc:
             await ctx.reply(
-                f"❌ Rekening *{from_name}* tidak ditemukan.\n"
+                f"Rekening *{from_name}* tidak ditemukan.\n"
                 "Lihat rekening dengan `!finance rekening`."
             )
             return
         if not to_acc:
             await ctx.reply(
-                f"❌ Rekening *{to_name}* tidak ditemukan.\n"
+                f"Rekening *{to_name}* tidak ditemukan.\n"
                 "Lihat rekening dengan `!finance rekening`."
             )
             return
@@ -276,7 +286,7 @@ class FinanceCommandHandler(BaseCommandHandler):
         if rest[0].lower() == "baru":
             if len(rest) < 2:
                 await ctx.reply(
-                    "❌ Format: `!finance rekening baru <nama> [tipe] [saldo_awal]`\n"
+                    "Format: `!finance rekening baru <nama> [tipe] [saldo_awal]`\n"
                     "Tipe: `cash`, `bank`, `ewallet`, `savings`, `investment`\n"
                     "Contoh:\n"
                     "  `!finance rekening baru BCA bank 5jt`\n"
@@ -309,15 +319,106 @@ class FinanceCommandHandler(BaseCommandHandler):
             )
             saldo_str = f"Rp {int(initial_balance):,}".replace(",", ".")
             await ctx.reply(
-                f"✅ *Rekening baru berhasil dibuat!*\n"
-                f"🏦 Nama: {acc.name}\n"
-                f"📋 Tipe: {acc.account_type.value}\n"
-                f"💰 Saldo awal: {saldo_str}"
+                f"*Rekening baru berhasil dibuat!*\n"
+                f"Nama: {acc.name}\n"
+                f"Tipe: {acc.account_type.value}\n"
+                f"Saldo awal: {saldo_str}"
+            )
+            return
+
+        if rest[0].lower() in ("hapus", "delete", "remove"):
+            if len(rest) < 2:
+                await ctx.reply(
+                    "Format: `!finance rekening hapus <nama_rekening> [YA]`\n"
+                    "Contoh:\n"
+                    "  `!finance rekening hapus BCA` _(akan meminta konfirmasi)_\n"
+                    "  `!finance rekening hapus BCA YA` _(langsung konfirmasi)_"
+                )
+                return
+
+            confirm_keywords = {"--konfirmasi", "-y", "--yes", "ya", "yes", "confirm", "konfirmasi"}
+            tokens = [t for t in rest[1:] if t.lower() not in confirm_keywords]
+            has_confirmation = any(t.lower() in confirm_keywords for t in rest[1:])
+            target_name = " ".join(tokens).strip()
+
+            if not target_name:
+                await ctx.reply("Nama rekening belum ditentukan. Contoh: `!finance rekening hapus BCA`")
+                return
+
+            acc = await self._svc.find_account_by_name(owner_jid, target_name)
+            if not acc:
+                await ctx.reply(
+                    f"Rekening *{target_name}* tidak ditemukan.\n"
+                    "Lihat daftar rekening dengan `!finance rekening`."
+                )
+                return
+
+            saldo_str = f"Rp {int(acc.balance):,}".replace(",", ".")
+
+            if not has_confirmation:
+                await ctx.reply(
+                    "*KONFIRMASI HAPUS REKENING*\n"
+                    "━━━━━━━━━━━━━━━━━━\n"
+                    f"Apakah Anda yakin ingin menghapus rekening berikut?\n\n"
+                    f"Nama: *{acc.name}*\n"
+                    f"Tipe: *{acc.account_type.value}*\n"
+                    f"Sisa Saldo: *{saldo_str}*\n\n"
+                    "_Rekening akan dinonaktifkan dari daftar rekening aktif._\n\n"
+                    "Ketik perintah berikut untuk konfirmasi:\n"
+                    f"`!finance rekening hapus {acc.name} YA`\n"
+                    f"_(atau `!finance rekening hapus {acc.name} --konfirmasi`)_"
+                )
+                return
+
+            deleted_acc = await self._svc.delete_account(owner_jid, acc.id)
+            await ctx.reply(
+                "*Rekening Berhasil Dihapus!*\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                f"Nama: {deleted_acc.name}\n"
+                f"Tipe: {deleted_acc.account_type.value}\n"
+                f"Saldo Terakhir: {saldo_str}"
             )
             return
 
         accounts = await self._svc.get_accounts(owner_jid)
         await ctx.reply(format_accounts_list(accounts))
+
+    async def _handle_reset(
+        self, ctx: CommandContext, owner_jid: str, rest: list[str]
+    ) -> None:
+        confirm_keywords = {"ya", "yes", "iya", "konfirmasi", "confirm", "-y", "--yes"}
+        has_confirmation = any(t.lower() in confirm_keywords for t in rest)
+
+        if not has_confirmation:
+            # Tampilkan preview tanpa menghapus
+            preview = await self._svc.get_reset_preview(owner_jid)
+            await ctx.reply(
+                "*RESET DATA FINANCE*\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "Data berikut akan dihapus permanen:\n\n"
+                f"  Rekening: *{preview['accounts']}*\n"
+                f"  Transaksi: *{preview['transactions']}*\n"
+                f"  Budget: *{preview['budgets']}*\n"
+                f"  Kategori: *{preview['categories']}*\n\n"
+                "_Aksi ini tidak dapat dibatalkan!_\n\n"
+                "Ketik perintah berikut untuk konfirmasi:\n"
+                "`!finance reset YA`"
+            )
+            return
+
+        # Eksekusi reset
+        counts = await self._svc.reset_all_data(owner_jid)
+        await ctx.reply(
+            "*Reset Data Finance Selesai!*\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "Data yang telah dihapus:\n\n"
+            f"  Rekening: *{counts.get('accounts', 0)}*\n"
+            f"  Transaksi: *{counts.get('transactions', 0)}*\n"
+            f"  Budget: *{counts.get('budgets', 0)}*\n"
+            f"  Kategori: *{counts.get('categories', 0)}*\n\n"
+            "_Data finance kamu sudah bersih dari nol._\n"
+            "Kategori default akan dibuat otomatis saat pertama kali digunakan."
+        )
 
     async def _handle_categories(self, ctx: CommandContext, owner_jid: str) -> None:
         await self._svc.ensure_defaults(owner_jid)
@@ -326,14 +427,14 @@ class FinanceCommandHandler(BaseCommandHandler):
         expense_cats = [c for c in categories if c.category_type.value == "expense"]
         income_cats = [c for c in categories if c.category_type.value == "income"]
 
-        lines = ["📁 *Kategori Keuangan*", "━━━━━━━━━━━━━━━━━━"]
-        lines.append("📤 *Pengeluaran:*")
+        lines = ["*Kategori Keuangan*", "━━━━━━━━━━━━━━━━━━"]
+        lines.append("*Pengeluaran:*")
         for cat in expense_cats:
-            lines.append(f"  {cat.icon or '•'} {cat.name}")
+            lines.append(f"  • {cat.name}")
         lines.append("")
-        lines.append("📥 *Pemasukan:*")
+        lines.append("*Pemasukan:*")
         for cat in income_cats:
-            lines.append(f"  {cat.icon or '•'} {cat.name}")
+            lines.append(f"  • {cat.name}")
 
         await ctx.reply("\n".join(lines))
 
@@ -352,11 +453,11 @@ class FinanceCommandHandler(BaseCommandHandler):
         # 2. Delete budget: "!finance budget hapus <kategori>"
         if rest[0].lower() in ("hapus", "delete", "remove"):
             if len(rest) < 2:
-                await ctx.reply("❌ Format: `!finance budget hapus <kategori>`\nContoh: `!finance budget hapus makan`")
+                await ctx.reply("Format: `!finance budget hapus <kategori>`\nContoh: `!finance budget hapus makan`")
                 return
             category_name = " ".join(rest[1:])
             await self._svc.delete_budget(owner_jid, category_name)
-            await ctx.reply(f"✅ Budget untuk kategori *{category_name}* bulan ini berhasil dihapus.")
+            await ctx.reply(f"Budget untuk kategori *{category_name}* bulan ini berhasil dihapus.")
             return
 
         # 3. Check if an amount is present -> Create / Update budget
@@ -367,7 +468,7 @@ class FinanceCommandHandler(BaseCommandHandler):
             if not category_name:
                 category_name = rest[0]
             progress = await self._svc.set_budget(owner_jid, category_name, amount)
-            await ctx.reply(f"✅ *Budget Berhasil Diatur!*\n\n{format_budget_progress(progress)}")
+            await ctx.reply(f"*Budget Berhasil Diatur!*\n\n{format_budget_progress(progress)}")
             return
 
         # 4. No amount -> View single budget progress: "!finance budget <kategori>"

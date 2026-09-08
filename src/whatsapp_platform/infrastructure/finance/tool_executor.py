@@ -70,6 +70,9 @@ class FinanceToolExecutor:
             elif tool_name == "finance_create_account":
                 return await self._create_account(owner_jid, arguments)
 
+            elif tool_name == "finance_delete_account":
+                return await self._delete_account(owner_jid, arguments)
+
             elif tool_name == "finance_get_accounts":
                 return await self._get_accounts(owner_jid)
 
@@ -96,6 +99,9 @@ class FinanceToolExecutor:
 
             elif tool_name == "finance_delete_budget":
                 return await self._delete_budget(owner_jid, arguments)
+
+            elif tool_name == "finance_reset_data":
+                return await self._reset_data(owner_jid, arguments)
 
             else:
                 return json.dumps({
@@ -450,6 +456,38 @@ class FinanceToolExecutor:
             "balance": float(acc.balance),
         }, ensure_ascii=False)
 
+    async def _delete_account(self, owner_jid: str, args: dict) -> str:
+        name: str = args["name"]
+        confirm: bool = bool(args.get("confirm", False))
+
+        acc = await self._svc.find_account_by_name(owner_jid, name)
+        if not acc:
+            acc = await self._svc._repo.get_account_by_id(name, owner_jid)
+
+        if not acc:
+            raise AccountNotFoundError(f"Rekening '{name}' tidak ditemukan.")
+
+        if not confirm:
+            return json.dumps({
+                "status": "need_confirmation",
+                "account_name": acc.name,
+                "account_type": acc.account_type.value,
+                "balance": float(acc.balance),
+                "message": (
+                    f"Rekening '{acc.name}' ({acc.account_type.value}) memiliki sisa saldo "
+                    f"Rp {int(acc.balance):,}. Apakah Anda yakin ingin menghapusnya? "
+                    "Tanyakan konfirmasi kepada pengguna sebelum memanggil tool ini dengan confirm=true."
+                ),
+            }, ensure_ascii=False)
+
+        deleted = await self._svc.delete_account(owner_jid, acc.id)
+        return json.dumps({
+            "status": "success",
+            "message": f"Rekening '{deleted.name}' berhasil dihapus/dinonaktifkan.",
+            "account_name": deleted.name,
+            "balance": float(deleted.balance),
+        }, ensure_ascii=False)
+
     # ── New handlers (Level 1 additions) ──────────────────────────────────────
 
     async def _get_accounts(self, owner_jid: str) -> str:
@@ -700,20 +738,65 @@ class FinanceToolExecutor:
             ],
         }, ensure_ascii=False)
 
-    async def _delete_budget(self, owner_jid: str, args: dict) -> str:
-        category_name: str = args["category_name"]
-        month = args.get("month")
-        year = args.get("year")
+    async def _delete_budget(self, owner_jid: str, arguments: dict) -> str:
+        import calendar
+        from datetime import UTC, datetime
+        now = datetime.now(UTC)
 
-        await self._svc.delete_budget(
-            owner_jid=owner_jid,
-            category_name=category_name,
-            month=int(month) if month is not None else None,
-            year=int(year) if year is not None else None,
+        category_name: str = arguments.get("category_name", "")
+        month: int = int(arguments.get("month") or now.month)
+        year: int = int(arguments.get("year") or now.year)
+
+        await self._svc.delete_budget(owner_jid, category_name, month=month, year=year)
+        month_name = calendar.month_name[month]
+        return json.dumps(
+            {
+                "status": "success",
+                "message": f"Budget kategori '{category_name}' untuk {month_name} {year} berhasil dihapus.",
+            },
+            ensure_ascii=False,
         )
-        return json.dumps({
-            "status": "success",
-            "message": f"Budget untuk kategori '{category_name}' berhasil dihapus.",
-            "category": category_name,
-        }, ensure_ascii=False)
 
+    async def _reset_data(self, owner_jid: str, arguments: dict) -> str:
+        """Preview atau eksekusi reset semua data finance user."""
+        confirm: bool = bool(arguments.get("confirm", False))
+
+        if not confirm:
+            # Preview saja — tidak menghapus
+            preview = await self._svc.get_reset_preview(owner_jid)
+            return json.dumps(
+                {
+                    "status": "preview",
+                    "message": (
+                        "Preview data yang akan dihapus jika reset dikonfirmasi. "
+                        "Belum ada yang dihapus."
+                    ),
+                    "data": {
+                        "accounts": preview["accounts"],
+                        "transactions": preview["transactions"],
+                        "budgets": preview["budgets"],
+                        "categories": preview["categories"],
+                    },
+                    "next_step": (
+                        "Sampaikan ringkasan ini ke pengguna dan minta konfirmasi eksplisit. "
+                        "Jika dikonfirmasi, panggil finance_reset_data dengan confirm=True."
+                    ),
+                },
+                ensure_ascii=False,
+            )
+
+        # Eksekusi reset
+        counts = await self._svc.reset_all_data(owner_jid)
+        return json.dumps(
+            {
+                "status": "success",
+                "message": "Semua data finance berhasil direset ke kondisi nol bersih.",
+                "deleted": {
+                    "accounts": counts.get("accounts", 0),
+                    "transactions": counts.get("transactions", 0),
+                    "budgets": counts.get("budgets", 0),
+                    "categories": counts.get("categories", 0),
+                },
+            },
+            ensure_ascii=False,
+        )

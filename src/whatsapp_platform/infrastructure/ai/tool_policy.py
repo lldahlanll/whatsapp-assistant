@@ -46,16 +46,39 @@ def select_tools(intent: IntentType, text: str) -> list[ToolDefinition] | None:
 def _select_finance_tools(lower: str) -> list[ToolDefinition]:
     """Select specific finance sub-tools based on message keywords."""
     is_budget = any(kw in lower for kw in ("budget", "anggaran"))
-    is_balance_query = any(kw in lower for kw in ("saldo", "rekening", "kas", "dompet", "uang", "duit", "sisa"))
-    is_mutation = any(kw in lower for kw in ("catat", "catet", "bayar", "beli", "transfer", "pengeluaran", "pemasukan", "gaji", "belanja", "kirim"))
+    is_reset = any(kw in lower for kw in (
+        "reset", "hapus semua", "bersihkan semua", "mulai dari nol",
+        "hapus data keuangan", "hapus semua data", "reset keuangan", "reset finance",
+    ))
+    is_history_query = any(kw in lower for kw in (
+        "riwayat", "histori", "history", "transaksi", "terakhir",
+        "list transaksi", "listkan", "tampilkan", "lihat transaksi",
+    ))
+    is_mutation = any(kw in lower for kw in (
+        "catat", "catet", "bayar", "beli", "transfer", "pengeluaran",
+        "pemasukan", "gaji", "belanja", "kirim",
+    ))
     is_report = any(kw in lower for kw in ("rekap", "laporan", "summary", "bulan ini"))
-    is_account = any(kw in lower for kw in ("buat rekening", "tambah akun", "buka rekening", "bikin dompet"))
-    is_modify_or_delete = any(kw in lower for kw in ("hapus", "ubah", "koreksi", "edit", "salah", "batalkan", "cancel", "ganti"))
-    is_info_query = any(kw in lower for kw in ("kategori", "daftar akun", "akun apa", "rekening apa", "dompet apa"))
+    is_account_create = any(kw in lower for kw in (
+        "buat rekening", "tambah akun", "buka rekening", "bikin dompet", "bikin rekening",
+    ))
+    is_modify_or_delete = any(kw in lower for kw in (
+        "hapus", "ubah", "koreksi", "edit", "salah", "batalkan", "cancel", "ganti",
+    ))
+    is_account_query = any(kw in lower for kw in (
+        "daftar rekening", "daftar akun", "akun apa", "rekening apa",
+        "dompet apa", "akun saya", "rekening saya", "punya rekening",
+    ))
+    is_balance_query = any(kw in lower for kw in (
+        "saldo", "berapa uang", "berapa duit", "berapa sisa", "cek saldo",
+    ))
+    is_kategori_query = any(kw in lower for kw in ("kategori", "kategori apa"))
 
     names: list[str] = []
 
-    if is_budget:
+    if is_reset:
+        names = ["finance_reset_data"]
+    elif is_budget:
         names = [
             "finance_create_budget",
             "finance_get_budget",
@@ -64,15 +87,24 @@ def _select_finance_tools(lower: str) -> list[ToolDefinition]:
             "finance_get_categories",
         ]
     elif is_modify_or_delete:
-        names = [
-            "finance_get_transaction_detail",
-            "finance_update_transaction",
-            "finance_delete_transaction",
-            "finance_get_transactions",
-            "finance_delete_budget",
-        ]
-    elif is_info_query:
-        names = ["finance_get_accounts", "finance_get_categories", "finance_get_balance"]
+        # Tentukan lebih spesifik: hapus rekening vs hapus transaksi vs hapus budget
+        if any(kw in lower for kw in ("rekening", "akun", "dompet", "kas")):
+            names = ["finance_delete_account", "finance_get_accounts"]
+        elif any(kw in lower for kw in ("budget", "anggaran")):
+            names = ["finance_delete_budget", "finance_list_budgets"]
+        else:
+            names = [
+                "finance_get_transaction_detail",
+                "finance_update_transaction",
+                "finance_delete_transaction",
+                "finance_get_transactions",
+            ]
+    elif is_history_query:
+        names = ["finance_get_transactions"]
+    elif is_account_query:
+        names = ["finance_get_accounts", "finance_get_balance"]
+    elif is_kategori_query:
+        names = ["finance_get_categories"]
     elif is_mutation:
         names = [
             "finance_add_expense",
@@ -90,7 +122,7 @@ def _select_finance_tools(lower: str) -> list[ToolDefinition]:
             "finance_get_balance",
             "finance_list_budgets",
         ]
-    elif is_account:
+    elif is_account_create:
         names = ["finance_create_account", "finance_get_accounts", "finance_get_balance"]
     elif is_balance_query:
         names = ["finance_get_balance"]

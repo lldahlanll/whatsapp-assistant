@@ -185,6 +185,24 @@ class FinanceService:
                 return acc
         return None
 
+    async def delete_account(
+        self, owner_jid: str, name_or_id: str
+    ) -> FinanceAccount:
+        """Menonaktifkan / menghapus rekening berdasarkan ID atau nama."""
+        acc = await self._repo.get_account_by_id(name_or_id, owner_jid)
+        if not acc:
+            acc = await self.find_account_by_name(owner_jid, name_or_id)
+
+        if not acc:
+            raise AccountNotFoundError(f"Rekening '{name_or_id}' tidak ditemukan.")
+
+        success = await self._repo.delete_account(acc.id, owner_jid)
+        if not success:
+            raise FinanceServiceError(f"Gagal menghapus rekening '{acc.name}'.")
+
+        logger.info("Account deleted/deactivated", owner=owner_jid, account_id=acc.id, name=acc.name)
+        return acc
+
     # ── Categories ────────────────────────────────────────────────────────────
 
     async def _resolve_category(
@@ -734,5 +752,32 @@ class FinanceService:
             )
         logger.info("Budget deleted", owner=owner_jid, category=category.name, month=m, year=y)
         return True
+
+    # ── Reset ──────────────────────────────────────────────────────────────────
+
+    async def get_reset_preview(self, owner_jid: str) -> dict[str, int]:
+        """Return hitungan data finance yang akan dihapus tanpa menghapusnya."""
+        accounts = await self._repo.get_accounts(owner_jid)
+        now = datetime.now(UTC)
+        transactions = await self._repo.get_transactions(owner_jid, limit=9999)
+        budgets = await self._repo.get_budgets(owner_jid, now.month, now.year)
+        categories = await self._repo.get_categories(owner_jid)
+        return {
+            "accounts": len(accounts),
+            "transactions": len(transactions),
+            "budgets": len(budgets),
+            "categories": len(categories),
+        }
+
+    async def reset_all_data(self, owner_jid: str) -> dict[str, int]:
+        """Hapus semua data finance milik owner_jid. Return jumlah baris yang dihapus."""
+        counts = await self._repo.reset_all_data(owner_jid)
+        logger.warning(
+            "Finance data reset executed",
+            owner=owner_jid,
+            deleted=counts,
+        )
+        return counts
+
 
 

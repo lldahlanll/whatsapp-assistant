@@ -26,7 +26,7 @@ SUPPORTED_MODELS: dict[str, list[str]] = {
 ALL_SUPPORTED_MODELS: set[str] = {m for models in SUPPORTED_MODELS.values() for m in models}
 
 DEFAULT_MODELS: dict[str, str] = {
-    "gemini": "gemini-3.6-flash",
+    "gemini": "gemini-3.5-flash-lite",
     "groq": "openai/gpt-oss-20b",
     "openrouter": "openai/gpt-oss-20b:free",
 }
@@ -61,9 +61,10 @@ BASE_SYSTEM_PROMPT = (
     "- Use *BOLD TEXT* instead of headings.\n"
     "- Never use tables. Use lists instead.\n"
     "- For lists, use '-' or numbered lists.\n"
-    "- Emojis are optional and should be used sparingly.\n"
+    "- Strictly DO NOT use emojis or icons (no icons/emojis like 💰, 📊, 📅, 🏦, ✅, 🔴, 🟢, 💡, 🎯, etc.). Keep responses clean, plain text, and professional.\n"
+    "- Hindari penggunaan icon atau emoji sama sekali di setiap jawaban.\n"
+    "- Never use icons or emojis unless explicitly requested by the user.\n"
     "- Keep paragraphs short and easy to read on mobile.\n"
-    "- Do not put emojis on every line or before every point.\n"
     "\n"
     "Response length rules:\n"
     "- Keep responses as short as possible while still being useful.\n"
@@ -105,12 +106,12 @@ AI_FINANCE_SYSTEM_PROMPT = f"{BASE_SYSTEM_PROMPT}\n{FINANCE_SYSTEM_PROMPT}"
 AI_FULL_SYSTEM_PROMPT = f"{BASE_SYSTEM_PROMPT}\n{NETWORK_SYSTEM_PROMPT}\n\n{FINANCE_SYSTEM_PROMPT}"
 
 AI_FALLBACK_BUSY_MESSAGE = (
-    "⚠️ Semua AI provider sedang sibuk atau mengalami batas penggunaan. "
+    "Semua AI provider sedang sibuk atau mengalami batas penggunaan. "
     "Silakan coba beberapa saat lagi."
 )
 
 AI_FALLBACK_ERROR_MESSAGE = (
-    "⚠️ Maaf, terjadi kesalahan saat memproses permintaan AI. "
+    "Maaf, terjadi kesalahan saat memproses permintaan AI. "
     "Silakan coba lagi nanti."
 )
 

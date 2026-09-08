@@ -173,6 +173,22 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
                 m.balance = new_balance
                 await session.commit()
 
+    async def delete_account(self, account_id: str, owner_jid: str) -> bool:
+        async with self._session() as session:
+            result = await session.execute(
+                select(FinanceAccountModel).where(
+                    FinanceAccountModel.id == account_id,
+                    FinanceAccountModel.owner_jid == owner_jid,
+                    FinanceAccountModel.is_active.is_(True),
+                )
+            )
+            m = result.scalar_one_or_none()
+            if not m:
+                return False
+            m.is_active = False
+            await session.commit()
+            return True
+
     # ── Categories ────────────────────────────────────────────────────────────
 
     async def create_category(self, category: FinanceCategory) -> FinanceCategory:
@@ -876,3 +892,45 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
                 )
             )
         return progress_list
+
+    # ── Reset ──────────────────────────────────────────────────────────────────
+
+    async def reset_all_data(self, owner_jid: str) -> dict[str, int]:
+        """Hapus semua data finance milik owner_jid dan return jumlah baris per tabel."""
+        from sqlalchemy import delete as sa_delete
+
+        async with self._session() as session:
+            # Urutan penting: hapus dependant dulu sebelum parent
+            counts: dict[str, int] = {}
+
+            res = await session.execute(
+                sa_delete(FinanceTransactionModel).where(
+                    FinanceTransactionModel.owner_jid == owner_jid
+                )
+            )
+            counts["transactions"] = res.rowcount
+
+            res = await session.execute(
+                sa_delete(FinanceBudgetModel).where(
+                    FinanceBudgetModel.owner_jid == owner_jid
+                )
+            )
+            counts["budgets"] = res.rowcount
+
+            res = await session.execute(
+                sa_delete(FinanceAccountModel).where(
+                    FinanceAccountModel.owner_jid == owner_jid
+                )
+            )
+            counts["accounts"] = res.rowcount
+
+            res = await session.execute(
+                sa_delete(FinanceCategoryModel).where(
+                    FinanceCategoryModel.owner_jid == owner_jid
+                )
+            )
+            counts["categories"] = res.rowcount
+
+            await session.commit()
+            return counts
+

@@ -450,7 +450,7 @@ def test_format_budget_progress_and_list():
 
     list_formatted = format_budget_list([progress], 8, 2026)
     assert "Budget Agustus 2026" in list_formatted
-    assert "🍜 *Makanan & Minuman*" in list_formatted
+    assert "*Makanan & Minuman*" in list_formatted
     assert "Rp 650.000 / Rp 1.000.000 — *65%* (aman)" in list_formatted
 
 

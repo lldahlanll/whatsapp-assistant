@@ -63,6 +63,69 @@ def test_finance_mutation_fast_path_generator():
     assert "Rp 4.975.000" in confirmation
 
 
+def test_finance_query_fast_path_get_transactions():
+    """Verify finance_get_transactions fast path formatting."""
+    raw_res = json.dumps({
+        "status": "success",
+        "count": 2,
+        "transactions": [
+            {
+                "transaction_id": "TX01",
+                "date": "2026-09-03",
+                "type": "expense",
+                "amount": 50000,
+                "description": "Makan siang",
+                "account": "BCA",
+            },
+            {
+                "transaction_id": "TX02",
+                "date": "2026-09-02",
+                "type": "income",
+                "amount": 1000000,
+                "description": "Gaji",
+                "account": "Mandiri",
+            }
+        ]
+    })
+    result = try_finance_mutation_fast_path("finance_get_transactions", raw_res)
+    assert result is not None
+    assert "Riwayat Transaksi" in result
+    assert "Rp 50.000" in result
+    assert "Rp 1.000.000" in result
+    assert "TX01" in result
+
+
+def test_finance_query_fast_path_get_balance():
+    """Verify finance_get_balance fast path formatting."""
+    raw_res = json.dumps({
+        "status": "success",
+        "accounts": [
+            {"name": "BCA", "type": "bank", "balance": 1500000},
+            {"name": "Kas", "type": "cash", "balance": 250000}
+        ]
+    })
+    result = try_finance_mutation_fast_path("finance_get_balance", raw_res)
+    assert result is not None
+    assert "Saldo Rekening" in result
+    assert "Rp 1.500.000" in result
+    assert "Rp 1.750.000" in result
+
+
+def test_finance_query_fast_path_delete_account_confirmation():
+    """Verify finance_delete_account need_confirmation fast path."""
+    raw_res = json.dumps({
+        "status": "need_confirmation",
+        "account_name": "BCA",
+        "account_type": "bank",
+        "balance": 1500000
+    })
+    result = try_finance_mutation_fast_path("finance_delete_account", raw_res)
+    assert result is not None
+    assert "Konfirmasi Hapus Rekening" in result
+    assert "BCA" in result
+    assert "Rp 1.500.000" in result
+
+
 @pytest.mark.asyncio
 async def test_p1_scenario_finance_mutation_fast_path():
     """"catat beli makan 25rb pakai BCA" -> fast path confirmation without 2nd LLM call."""

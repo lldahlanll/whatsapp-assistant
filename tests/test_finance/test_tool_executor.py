@@ -190,3 +190,68 @@ async def test_tool_executor_expense_with_custom_date(
     mock_service.add_expense.assert_called_once()
     assert mock_service.add_expense.call_args[1]["date"] == datetime(2026, 8, 23, 0, 0, tzinfo=UTC)
 
+
+@pytest.mark.asyncio
+async def test_tool_executor_delete_account_needs_confirmation(
+    mock_service: AsyncMock, user_jid: JID, chat_jid: JID
+) -> None:
+    executor = FinanceToolExecutor(mock_service)
+    bca_acc = FinanceAccount(
+        id="acc-bca",
+        owner_jid=str(user_jid),
+        name="BCA",
+        account_type=AccountType.BANK,
+        currency="IDR",
+        balance=Decimal("5000000"),
+        is_active=True,
+        created_at=datetime.now(UTC),
+    )
+    mock_service.find_account_by_name.return_value = bca_acc
+
+    # Call with confirm=False (default)
+    res_raw = await executor.execute(
+        tool_name="finance_delete_account",
+        arguments={"name": "BCA"},
+        user_jid=user_jid,
+        chat_jid=chat_jid,
+    )
+
+    data = json.loads(res_raw)
+    assert data["status"] == "need_confirmation"
+    assert data["account_name"] == "BCA"
+    assert data["balance"] == 5000000.0
+    mock_service.delete_account.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_tool_executor_delete_account_confirmed(
+    mock_service: AsyncMock, user_jid: JID, chat_jid: JID
+) -> None:
+    executor = FinanceToolExecutor(mock_service)
+    bca_acc = FinanceAccount(
+        id="acc-bca",
+        owner_jid=str(user_jid),
+        name="BCA",
+        account_type=AccountType.BANK,
+        currency="IDR",
+        balance=Decimal("5000000"),
+        is_active=True,
+        created_at=datetime.now(UTC),
+    )
+    mock_service.find_account_by_name.return_value = bca_acc
+    mock_service.delete_account.return_value = bca_acc
+
+    # Call with confirm=True
+    res_raw = await executor.execute(
+        tool_name="finance_delete_account",
+        arguments={"name": "BCA", "confirm": True},
+        user_jid=user_jid,
+        chat_jid=chat_jid,
+    )
+
+    data = json.loads(res_raw)
+    assert data["status"] == "success"
+    assert data["account_name"] == "BCA"
+    mock_service.delete_account.assert_called_once_with(str(user_jid), bca_acc.id)
+
+

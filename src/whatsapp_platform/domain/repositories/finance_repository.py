@@ -33,6 +33,9 @@ class IFinanceRepository(ABC):
     @abstractmethod
     async def update_account_balance(self, account_id: str, new_balance: Decimal) -> None: ...
 
+    @abstractmethod
+    async def delete_account(self, account_id: str, owner_jid: str) -> bool: ...
+
     # ── Categories ────────────────────────────────────────────────────────────
 
     @abstractmethod
@@ -152,4 +155,16 @@ class IFinanceRepository(ABC):
     async def list_budgets_with_progress(
         self, owner_jid: str, month: int, year: int
     ) -> list[BudgetProgress]: ...
+
+    # ── Reset ─────────────────────────────────────────────────────────────────
+
+    @abstractmethod
+    async def reset_all_data(self, owner_jid: str) -> dict[str, int]:
+        """Hapus semua data finance milik owner_jid.
+
+        Returns:
+            dict berisi jumlah baris yang dihapus per tabel,
+            contoh: {'transactions': 5, 'budgets': 2, 'accounts': 3, 'categories': 18}
+        """
+        ...
 

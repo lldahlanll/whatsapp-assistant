@@ -315,3 +315,33 @@ async def test_reversal_restores_balances_and_marks_original_reversed(mock_repo:
     balance_updates = mock_repo.reverse_transaction_atomic.call_args[1]["balance_updates"]
     # 450,000 + 50,000 == 500,000
     assert balance_updates[acc.id] == Decimal("500000")
+
+
+@pytest.mark.asyncio
+async def test_delete_account_by_name(mock_repo: AsyncMock, owner_jid: str) -> None:
+    from whatsapp_platform.features.finance.service import AccountNotFoundError
+
+    svc = FinanceService(mock_repo)
+    acc = FinanceAccount(
+        id="acc-bca-1",
+        owner_jid=owner_jid,
+        name="BCA",
+        account_type=AccountType.BANK,
+        currency="IDR",
+        balance=Decimal("500000"),
+        is_active=True,
+        created_at=None,  # type: ignore[arg-type]
+    )
+    mock_repo.get_account_by_id.return_value = None
+    mock_repo.get_accounts.return_value = [acc]
+    mock_repo.delete_account.return_value = True
+
+    deleted = await svc.delete_account(owner_jid, "BCA")
+    assert deleted.name == "BCA"
+    mock_repo.delete_account.assert_called_once_with(acc.id, owner_jid)
+
+    # Test not found
+    mock_repo.get_accounts.return_value = []
+    with pytest.raises(AccountNotFoundError):
+        await svc.delete_account(owner_jid, "Mandiri")
+

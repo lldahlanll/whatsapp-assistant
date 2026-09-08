@@ -22,7 +22,6 @@ def format_health_report(report: dict[str, Any]) -> str:
     system = report.get("system", {})
     health_score = report.get("health_score", {})
     score = health_score.get("score", 0)
-    status_emoji = health_score.get("status_emoji", "🟢")
     status = health_score.get("status", "HEALTHY")
 
     board = system.get("board_name", "MikroTik")
@@ -33,7 +32,7 @@ def format_health_report(report: dict[str, Any]) -> str:
     total_mem = _format_bytes(system.get("memory", {}).get("total_bytes", 0))
     free_mem = _format_bytes(system.get("memory", {}).get("free_bytes", 0))
 
-    temp_str = f"\n🌡️ *Suhu*: {system.get('temperature')}°C" if system.get("temperature") is not None else ""
+    temp_str = f"\n*Suhu*: {system.get('temperature')}°C" if system.get("temperature") is not None else ""
 
     running_ifaces = report.get("running_interfaces", 0)
     total_ifaces = report.get("interfaces_count", 0)
@@ -46,17 +45,17 @@ def format_health_report(report: dict[str, Any]) -> str:
     )
 
     return (
-        f"📡 *Kondisi Jaringan MikroTik*\n"
+        f"*Kondisi Jaringan MikroTik*\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"Status: {status_emoji} *{status}* (Skor: *{score}/100*)\n\n"
-        f"📟 *Perangkat*: `{board}` (RouterOS `{version}`)\n"
-        f"⏱️ *Uptime*: {uptime}\n"
-        f"⚙️ *CPU Load*: {cpu}%\n"
-        f"🧠 *RAM*: {mem_pct}% (Free: {free_mem} / {total_mem}){temp_str}\n"
-        f"🔌 *Interface*: {running_ifaces}/{total_ifaces} Aktif\n"
-        f"👥 *DHCP Client*: {active_dhcp} perangkat\n"
+        f"Status: *{status}* (Skor: *{score}/100*)\n\n"
+        f"*Perangkat*: `{board}` (RouterOS `{version}`)\n"
+        f"*Uptime*: {uptime}\n"
+        f"*CPU Load*: {cpu}%\n"
+        f"*RAM*: {mem_pct}% (Free: {free_mem} / {total_mem}){temp_str}\n"
+        f"*Interface*: {running_ifaces}/{total_ifaces} Aktif\n"
+        f"*DHCP Client*: {active_dhcp} perangkat\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"ℹ️ _{summary_note}_"
+        f"_{summary_note}_"
     )
 
 
@@ -64,12 +63,12 @@ def format_traffic_report(report: dict[str, Any]) -> str:
     """Format interface traffic report for WhatsApp."""
     interfaces = report.get("interfaces", [])
     if not interfaces:
-        return "📊 *Traffic Interface*\n\nTidak ada interface aktif yang ditemukan."
+        return "*Traffic Interface*\n\nTidak ada interface aktif yang ditemukan."
 
-    lines = ["📊 *Traffic & Bandwidth Interface*", "━━━━━━━━━━━━━━━━━━"]
+    lines = ["*Traffic & Bandwidth Interface*", "━━━━━━━━━━━━━━━━━━"]
     for iface in interfaces:
         name = iface.get("name", "unknown")
-        running = "🟢 UP" if iface.get("running") else "🔴 DOWN"
+        running = "UP" if iface.get("running") else "DOWN"
         traffic = iface.get("traffic", {})
         rx = _format_bytes(traffic.get("rx_bytes", 0))
         tx = _format_bytes(traffic.get("tx_bytes", 0))
@@ -77,15 +76,15 @@ def format_traffic_report(report: dict[str, Any]) -> str:
         errors = health.get("rx_errors", 0) + health.get("tx_errors", 0)
         drops = health.get("rx_drops", 0) + health.get("tx_drops", 0)
 
-        err_str = f" | ⚠️ Err/Drop: {errors}/{drops}" if (errors > 0 or drops > 0) else ""
+        err_str = f" | Err/Drop: {errors}/{drops}" if (errors > 0 or drops > 0) else ""
 
         lines.append(
             f"• *{name}* ({running})\n"
-            f"  📥 RX: `{rx}` | 📤 TX: `{tx}`{err_str}"
+            f"  RX: `{rx}` | TX: `{tx}`{err_str}"
         )
 
     lines.append("━━━━━━━━━━━━━━━━━━")
-    lines.append("ℹ️ _Data traffic dihitung secara kumulatif._")
+    lines.append("_Data traffic dihitung secara kumulatif._")
     return "\n".join(lines)
 
 
@@ -95,44 +94,41 @@ def format_security_report(report: dict[str, Any]) -> str:
     highest = report.get("highest_severity", "CLEAN")
     findings = report.get("findings", [])
 
-    status_emoji = "🟢" if score >= 85 else ("🟡" if score >= 70 else "🔴")
-
     lines = [
-        "🛡️ *Audit Keamanan MikroTik*",
+        "*Audit Keamanan MikroTik*",
         "━━━━━━━━━━━━━━━━━━",
-        f"Skor Keamanan: {status_emoji} *{score}/100*",
+        f"Skor Keamanan: *{score}/100*",
         f"Tingkat Risiko: *{highest}*",
         f"Temuan: *{len(findings)} isu*",
         "━━━━━━━━━━━━━━━━━━",
     ]
 
     if not findings:
-        lines.append("✅ *Konfigurasi router dalam kondisi aman dan terlindungi.*")
+        lines.append("*Konfigurasi router dalam kondisi aman dan terlindungi.*")
     else:
         for idx, f in enumerate(findings[:5], start=1):
             sev = f.get("severity", "INFO")
-            sev_icon = "🚨" if sev == "CRITICAL" else ("⚠️" if sev in ("HIGH", "MEDIUM") else "ℹ️")
             lines.append(
-                f"{idx}. {sev_icon} *[{sev}]* {f.get('title')}\n"
-                f"   _Bukti_: `{f.get('evidence')}`\n"
-                f"   💡 _Saran_: {f.get('recommendation')}\n"
+                f"{idx}. *[{sev}]* {f.get('title')}\n"
+                f"   Bukti: `{f.get('evidence')}`\n"
+                f"   Saran: {f.get('recommendation')}\n"
             )
 
         if len(findings) > 5:
             lines.append(f"_...dan {len(findings) - 5} temuan lainnya._")
 
     lines.append("━━━━━━━━━━━━━━━━━━")
-    lines.append("🔒 _Audit bersifat Read-Only tanpa mengubah konfigurasi._")
+    lines.append("_Audit bersifat Read-Only tanpa mengubah konfigurasi._")
     return "\n".join(lines)
 
 
 def format_dhcp_report(leases: list[dict[str, Any]]) -> str:
     """Format DHCP leases for WhatsApp."""
     if not leases:
-        return "👥 *Daftar DHCP Leases*\n\nTidak ada client DHCP aktif yang terdaftar."
+        return "*Daftar DHCP Leases*\n\nTidak ada client DHCP aktif yang terdaftar."
 
     lines = [
-        "👥 *Daftar DHCP Leases (Client Aktif)*",
+        "*Daftar DHCP Leases (Client Aktif)*",
         "━━━━━━━━━━━━━━━━━━",
     ]
 
@@ -140,8 +136,7 @@ def format_dhcp_report(leases: list[dict[str, Any]]) -> str:
         ip = item.get("address", "-")
         host = item.get("hostname") or item.get("comment") or "Unknown Device"
         mac = item.get("mac_address", "-")
-        status = "🟢" if item.get("status") == "bound" else "⚪"
-        lines.append(f"{status} *{ip}* — {host}\n   └ MAC: `{mac}`")
+        lines.append(f"• *{ip}* — {host}\n   └ MAC: `{mac}`")
 
     if len(leases) > 15:
         lines.append(f"\n_...total {len(leases)} perangkat terhubung._")
@@ -156,11 +151,11 @@ def format_firewall_report(report: dict[str, Any]) -> str:
     nats = report.get("nat_rules", [])
 
     lines = [
-        "🧱 *Ringkasan Firewall & NAT*",
+        "*Ringkasan Firewall & NAT*",
         "━━━━━━━━━━━━━━━━━━",
         f"• Total Filter Rules: *{len(filters)}*",
         f"• Total NAT Rules: *{len(nats)}*",
-        "\n📋 *Filter Rules Utama*:",
+        "\n*Filter Rules Utama*:",
     ]
 
     active_filters = [f for f in filters if not f.get("disabled")][:5]
@@ -173,7 +168,7 @@ def format_firewall_report(report: dict[str, Any]) -> str:
     else:
         lines.append("  _Tidak ada filter rule aktif._")
 
-    lines.append("\n🔄 *NAT Rules*:")
+    lines.append("\n*NAT Rules*:")
     active_nats = [n for n in nats if not n.get("disabled")][:3]
     if active_nats:
         for n in active_nats:
@@ -191,10 +186,10 @@ def format_firewall_report(report: dict[str, Any]) -> str:
 def format_logs_report(logs: list[dict[str, Any]]) -> str:
     """Format router logs for WhatsApp."""
     if not logs:
-        return "📜 *Log Aktivitas Router*\n\nTidak ada catatan log terbaru."
+        return "*Log Aktivitas Router*\n\nTidak ada catatan log terbaru."
 
     lines = [
-        "📜 *Log Aktivitas Router Terbaru*",
+        "*Log Aktivitas Router Terbaru*",
         "━━━━━━━━━━━━━━━━━━",
     ]
 
@@ -219,32 +214,32 @@ def format_network_error(exc: Exception) -> str:
 
     if isinstance(exc, MikroTikDisabledError):
         return (
-            "⚠️ *Fitur MikroTik Belum Diaktifkan*\n\n"
+            "*Fitur MikroTik Belum Diaktifkan*\n\n"
             "Integrasi MikroTik saat ini sedang nonaktif di konfigurasi bot."
         )
 
     if isinstance(exc, MikroTikAuthError):
         return (
-            "⚠️ *Gagal Terhubung ke MikroTik*\n\n"
+            "*Gagal Terhubung ke MikroTik*\n\n"
             "Status: Autentikasi atau izin akses RouterOS ditolak.\n"
             "Periksa username dan password akun API MikroTik Anda."
         )
 
     if isinstance(exc, MikroTikTimeoutError):
         return (
-            "⚠️ *Koneksi MikroTik Timeout*\n\n"
+            "*Koneksi MikroTik Timeout*\n\n"
             "Status: Router tidak merespons dalam batas waktu yang ditentukan.\n"
             "Periksa apakah service `www` / `www-ssl` aktif dan router dapat dijangkau."
         )
 
     if isinstance(exc, MikroTikPermissionError):
         return (
-            "⛔ *Akses Ditolak*\n\n"
+            "*Akses Ditolak*\n\n"
             "Nomor atau grup WhatsApp Anda tidak memiliki izin untuk menjalankan Network AI."
         )
 
     return (
-        "⚠️ *Maaf, tidak dapat mengambil data dari MikroTik saat ini.*\n\n"
+        "*Maaf, tidak dapat mengambil data dari MikroTik saat ini.*\n\n"
         "Status: Gangguan koneksi jaringan ke router.\n"
         "_(Tidak ada perubahan konfigurasi apa pun yang dilakukan)_"
     )

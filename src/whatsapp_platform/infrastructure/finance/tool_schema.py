@@ -278,6 +278,28 @@ FINANCE_TOOLS: list[ToolDefinition] = [
             ),
         ],
     ),
+    ToolDefinition(
+        name="finance_delete_account",
+        description=(
+            "Menghapus atau menonaktifkan rekening/tabungan milik pengguna. "
+            "PENTING: Selalu panggil dengan confirm=False terlebih dahulu untuk memeriksa sisa saldo dan mendapatkan konfirmasi dari pengguna, "
+            "kecuali jika pengguna sudah secara eksplisit mengonfirmasi (misal: 'Ya saya yakin hapus rekening BCA')."
+        ),
+        parameters=[
+            ToolParameter(
+                name="name",
+                type="string",
+                description="Nama rekening/dompet yang ingin dihapus (misal: 'BCA', 'GoPay', 'Tabungan').",
+                required=True,
+            ),
+            ToolParameter(
+                name="confirm",
+                type="boolean",
+                description="Set true jika pengguna sudah memberikan konfirmasi eksplisit untuk menghapus rekening.",
+                required=False,
+            ),
+        ],
+    ),
     # ── NEW TOOLS (Level 1 additions) ─────────────────────────────────────────
     ToolDefinition(
         name="finance_get_accounts",
@@ -510,5 +532,31 @@ FINANCE_TOOLS: list[ToolDefinition] = [
             ),
         ],
     ),
+    # ── Reset Tool ────────────────────────────────────────────────────────────
+    ToolDefinition(
+        name="finance_reset_data",
+        description=(
+            "Menghapus SEMUA data finance pengguna (rekening, transaksi, budget, kategori) "
+            "dan mereset ke kondisi nol bersih. "
+            "PERINGATAN KRITIS: Aksi ini permanen dan tidak bisa dibatalkan. "
+            "WAJIB minta konfirmasi eksplisit dari pengguna sebelum memanggil dengan confirm=True. "
+            "Jika confirm=False, hanya tampilkan preview jumlah data yang akan dihapus tanpa menghapus. "
+            "Contoh trigger: 'reset semua data keuangan', 'hapus semua data finance', "
+            "'mulai dari nol lagi', 'bersihkan semua catatan keuangan'."
+        ),
+        parameters=[
+            ToolParameter(
+                name="confirm",
+                type="boolean",
+                description=(
+                    "Set True HANYA jika pengguna sudah memberikan konfirmasi eksplisit "
+                    "(contoh: 'ya, hapus semuanya', 'iya saya yakin'). "
+                    "Set False (default) untuk menampilkan preview tanpa menghapus."
+                ),
+                required=False,
+            ),
+        ],
+    ),
 ]
+
 
