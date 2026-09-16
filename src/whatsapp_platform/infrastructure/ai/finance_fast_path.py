@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 
+from whatsapp_platform.features.finance.formatter import format_tx_date
+
 # ── Mutation tools (original fast-path) ───────────────────────────────────────
 
 MUTATION_TOOLS: set[str] = {
@@ -18,6 +20,30 @@ MUTATION_TOOLS: set[str] = {
     "finance_add_income",
     "finance_transfer",
 }
+
+GROUP_PRIVATE_TOOLS: set[str] = {
+    "finance_get_balance",
+    "finance_get_monthly_report",
+    "finance_get_transactions",
+    "finance_get_expense_summary",
+    "finance_create_account",
+    "finance_delete_account",
+    "finance_get_accounts",
+    "finance_get_categories",
+    "finance_get_transaction_detail",
+    "finance_update_transaction",
+    "finance_delete_transaction",
+    "finance_create_budget",
+    "finance_get_budget",
+    "finance_list_budgets",
+    "finance_delete_budget",
+    "finance_reset_data",
+}
+
+
+def is_group_blocked_tool(tool_name: str) -> bool:
+    """Return True if tool should be blocked in a group chat."""
+    return tool_name in GROUP_PRIVATE_TOOLS
 
 # ── All tools with local fast-path handlers ────────────────────────────────────
 
@@ -59,8 +85,14 @@ def _fast_add_expense(data: dict) -> str | None:
     if amount is None:
         return None
 
-    account = tx.get("account_name") or data.get("account_name") or "Kas"
-    category = tx.get("category_name") or data.get("category_name") or "-"
+    account = tx.get("account_name") or data.get("account_name") or "—"
+    category = (
+        tx.get("category_name")
+        or tx.get("category")
+        or data.get("category_name")
+        or data.get("category")
+        or "-"
+    )
     desc = tx.get("description") or data.get("description") or "-"
     new_balance = data.get("new_balance") or data.get("balance")
     date = tx.get("date") or data.get("date")
@@ -92,8 +124,14 @@ def _fast_add_income(data: dict) -> str | None:
     if amount is None:
         return None
 
-    account = tx.get("account_name") or data.get("account_name") or "Kas"
-    category = tx.get("category_name") or data.get("category_name") or "-"
+    account = tx.get("account_name") or data.get("account_name") or "—"
+    category = (
+        tx.get("category_name")
+        or tx.get("category")
+        or data.get("category_name")
+        or data.get("category")
+        or "-"
+    )
     desc = tx.get("description") or data.get("description") or "-"
     new_balance = data.get("new_balance") or data.get("balance")
     date = tx.get("date") or data.get("date")
@@ -158,24 +196,31 @@ def _fast_get_transactions(data: dict) -> str | None:
     if not transactions:
         return "Belum ada transaksi yang tercatat."
 
-    lines = ["*Riwayat Transaksi*\n"]
-    for i, tx in enumerate(transactions, 1):
-        amount = _fmt_rp(tx.get("amount", 0))
-        desc = tx.get("description") or tx.get("category") or tx.get("type", "")
-        date = tx.get("date", "")
-        account = tx.get("account") or ""
-        tx_id = tx.get("transaction_id", "")
+    header = "📜 *RIWAYAT TRANSAKSI*"
+    items = []
+    for tx in transactions:
+        tx_type = str(tx.get("type", "")).lower()
+        amt_val = abs(float(tx.get("amount", 0)))
+        amt_num = _fmt_rp(amt_val)
+        if tx_type == "income":
+            icon = "🟢"
+            amt_str = f"{icon} *+{amt_num}*"
+        elif tx_type == "expense":
+            icon = "🔴"
+            amt_str = f"{icon} *-{amt_num}*"
+        else:
+            icon = "🔵"
+            amt_str = f"{icon} *{amt_num}*"
 
-        line = f"{i}. *{amount}* — {desc}"
-        if date:
-            line += f"\n   Tanggal: {date}"
-        if account:
-            line += f" • {account}"
-        if tx_id:
-            line += f"\n   ID: `{tx_id}`"
-        lines.append(line)
+        desc = tx.get("description") or tx.get("category") or tx.get("type", "") or "—"
+        date_str = format_tx_date(tx.get("date"))
+        acc = tx.get("account") or ""
+        acc_str = f" ({acc})" if acc else ""
+        detail = f"{desc}{acc_str}"
 
-    return "\n".join(lines)
+        items.append(f"• {date_str} | {amt_str} | {detail}")
+
+    return f"{header}\n\n" + "\n".join(items)
 
 
 @_handler("finance_get_balance")
@@ -186,19 +231,51 @@ def _fast_get_balance(data: dict) -> str | None:
 
     accounts = data.get("accounts", [])
     if not accounts:
-        return "Belum ada rekening aktif. Buat rekening dulu ya."
+        return "Belum ada rekening aktif. Silakan buat rekening terlebih dahulu (contoh: 'buat rekening BCA saldo awal 1jt')."
 
-    lines = ["*Saldo Rekening*\n"]
-    total = 0.0
-    for acc in accounts:
-        balance = acc.get("balance", 0)
-        total += float(balance)
-        lines.append(f"• *{acc.get('name')}* — {_fmt_rp(balance)}")
+    available_accs = [
+        a
+        for a in accounts
+        if a.get("classification") == "available"
+        or (a.get("type", "bank").lower() in ("cash", "bank", "ewallet", "savings"))
+    ]
+    investment_accs = [
+        a
+        for a in accounts
+        if a.get("classification") == "investment"
+        or (a.get("type", "").lower() in ("deposit", "investment"))
+    ]
 
-    if len(accounts) > 1:
-        lines.append(f"\n*Total: {_fmt_rp(total)}*")
+    total = sum(float(acc.get("balance", 0)) for acc in accounts)
 
-    return "\n".join(lines)
+    if investment_accs and available_accs:
+        lines = ["*Saldo Rekening*\n", "*Saldo Tersedia:*"]
+        for acc in available_accs:
+            lines.append(f"• *{acc.get('name')}* — {_fmt_rp(acc.get('balance', 0))}")
+
+        lines.append("\n*Investasi:*")
+        for acc in investment_accs:
+            lines.append(f"• *{acc.get('name')}* — {_fmt_rp(acc.get('balance', 0))}")
+
+        lines.append(f"\n*Total Aset: {_fmt_rp(total)}*")
+        return "\n".join(lines)
+    elif investment_accs and not available_accs:
+        lines = ["*Saldo Rekening*\n", "*Investasi:*"]
+        for acc in investment_accs:
+            lines.append(f"• *{acc.get('name')}* — {_fmt_rp(acc.get('balance', 0))}")
+
+        lines.append(f"\n*Total Aset: {_fmt_rp(total)}*")
+        return "\n".join(lines)
+    else:
+        lines = ["*Saldo Rekening*\n"]
+        for acc in accounts:
+            balance = acc.get("balance", 0)
+            lines.append(f"• *{acc.get('name')}* — {_fmt_rp(balance)}")
+
+        if len(accounts) > 1:
+            lines.append(f"\n*Total: {_fmt_rp(total)}*")
+
+        return "\n".join(lines)
 
 
 @_handler("finance_get_accounts")
@@ -210,6 +287,28 @@ def _fast_get_accounts(data: dict) -> str | None:
     accounts = data.get("accounts", [])
     if not accounts:
         return "Belum ada rekening aktif. Buat rekening dulu ya."
+
+    available_accs = [
+        a
+        for a in accounts
+        if (a.get("type") or "bank").lower() in ("cash", "bank", "ewallet", "savings")
+    ]
+    investment_accs = [
+        a
+        for a in accounts
+        if (a.get("type") or "").lower() in ("deposit", "investment")
+    ]
+
+    if investment_accs and available_accs:
+        lines = [f"*Daftar Rekening* ({len(accounts)} rekening)\n", "*Saldo Tersedia:*"]
+        for acc in available_accs:
+            acc_type = (acc.get("type") or "bank").lower()
+            lines.append(f"• *{acc.get('name')}* ({acc_type}) — {_fmt_rp(acc.get('balance', 0))}")
+        lines.append("\n*Investasi:*")
+        for acc in investment_accs:
+            acc_type = (acc.get("type") or "investment").lower()
+            lines.append(f"• *{acc.get('name')}* ({acc_type}) — {_fmt_rp(acc.get('balance', 0))}")
+        return "\n".join(lines)
 
     lines = [f"*Daftar Rekening* ({len(accounts)} rekening)\n"]
     for acc in accounts:
@@ -324,11 +423,61 @@ def _fast_delete_account(data: dict) -> str | None:
     return None
 
 
+@_handler("finance_update_transaction")
+def _fast_update_transaction(data: dict) -> str | None:
+    status = str(data.get("status", "")).lower()
+    if status != "success":
+        # Return explicit error so LLM doesn't hallucinate a success response
+        error_msg = data.get("message", "")
+        error_code = data.get("error_code", "")
+        if error_code == "TRANSACTION_NOT_FOUND" or "tidak ditemukan" in error_msg.lower():
+            return (
+                "❌ *Gagal memperbarui transaksi*\n\n"
+                "Transaksi tidak ditemukan. Gunakan perintah *cek riwayat* atau "
+                "sebutkan kata kunci transaksi agar saya bisa mencarinya terlebih dahulu."
+            )
+        if error_msg:
+            return f"❌ *Gagal memperbarui transaksi*\n\n{error_msg}"
+        # Fallback generic error — never let LLM interpret this as success
+        return "❌ *Gagal memperbarui transaksi*\n\nTerjadi kesalahan. Coba lagi atau cek riwayat transaksi terlebih dahulu."
+
+    tx_id = data.get("transaction_id") or data.get("new_transaction_id", "")
+    amount = data.get("amount") or data.get("new_amount")
+    desc = data.get("description") or data.get("new_description") or "—"
+    cat = data.get("category") or data.get("new_category")
+    acc = data.get("account") or data.get("new_account")
+
+    lines = [
+        f"*Transaksi Berhasil Diperbarui!*\n",
+    ]
+    if tx_id:
+        lines.append(f"• ID: `{tx_id}`")
+    if amount is not None:
+        lines.append(f"• Nominal Baru: {_fmt_rp(amount)}")
+    if desc and desc != "—":
+        lines.append(f"• Catatan: {desc}")
+    if cat:
+        lines.append(f"• Kategori: {cat}")
+    if acc:
+        lines.append(f"• Rekening: {acc}")
+
+    return "\n".join(lines)
+
+
 @_handler("finance_delete_transaction")
 def _fast_delete_transaction(data: dict) -> str | None:
     status = str(data.get("status", "")).lower()
     if status != "success":
-        return None
+        error_msg = data.get("message", "")
+        error_code = data.get("error_code", "")
+        if error_code == "TRANSACTION_NOT_FOUND" or "tidak ditemukan" in error_msg.lower():
+            return (
+                "❌ *Gagal menghapus transaksi*\n\n"
+                "Transaksi tidak ditemukan. Gunakan *cek riwayat* untuk melihat ID transaksi yang benar."
+            )
+        if error_msg:
+            return f"❌ *Gagal menghapus transaksi*\n\n{error_msg}"
+        return "❌ *Gagal menghapus transaksi*\n\nTerjadi kesalahan saat menghapus transaksi."
 
     tx_id = data.get("deleted_transaction_id", "")
     msg = data.get("message", f"Transaksi {tx_id} berhasil dihapus.")
@@ -407,7 +556,11 @@ def _fast_get_budget(data: dict) -> str | None:
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 
-def try_finance_mutation_fast_path(tool_name: str, raw_tool_result: str) -> str | None:
+def try_finance_mutation_fast_path(
+    tool_name: str,
+    raw_tool_result: str,
+    is_group: bool = False,
+) -> str | None:
     """Attempt fast-path confirmation template generation.
 
     Covers both mutation tools and all read-only query tools to eliminate
@@ -416,15 +569,12 @@ def try_finance_mutation_fast_path(tool_name: str, raw_tool_result: str) -> str 
     Args:
         tool_name: Name of tool executed.
         raw_tool_result: Output JSON string from tool executor.
+        is_group: Whether the execution context is a group chat.
 
     Returns:
         Formatted WhatsApp text confirmation if successful, or None to fall back to LLM Call 2.
     """
     if not raw_tool_result:
-        return None
-
-    handler = _FAST_PATH_HANDLERS.get(tool_name)
-    if handler is None:
         return None
 
     try:
@@ -433,6 +583,26 @@ def try_finance_mutation_fast_path(tool_name: str, raw_tool_result: str) -> str 
         return None
 
     if not isinstance(data, dict):
+        return None
+
+    if is_group:
+        if data.get("error_code") == "GROUP_PRIVATE_ONLY":
+            return data.get(
+                "message",
+                "Data keuangan pribadi hanya dapat dilihat di chat private. Silakan hubungi saya lewat chat pribadi.",
+            )
+        if is_group_blocked_tool(tool_name):
+            return "Data keuangan pribadi hanya dapat dilihat di chat private. Silakan hubungi saya lewat chat pribadi."
+
+        # Strip balance info from mutation confirmations in group context
+        data.pop("new_balance", None)
+        data.pop("balance", None)
+        if isinstance(data.get("transaction"), dict):
+            data["transaction"].pop("new_balance", None)
+            data["transaction"].pop("balance", None)
+
+    handler = _FAST_PATH_HANDLERS.get(tool_name)
+    if handler is None:
         return None
 
     try:

@@ -359,7 +359,8 @@ class AIService:
                     user_jid=user_jid,
                     chat_jid=wa_chat_jid,
                 )
-                fast_path_reply = try_finance_mutation_fast_path(tc.name, tool_output)
+                is_group = bool(getattr(wa_chat_jid, "is_group", False))
+                fast_path_reply = try_finance_mutation_fast_path(tc.name, tool_output, is_group=is_group)
                 if fast_path_reply:
                     logger.info(
                         "Finance mutation fast-path confirmation generated locally (skipped 2nd LLM call)",

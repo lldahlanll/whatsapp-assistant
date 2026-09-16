@@ -65,6 +65,11 @@ class IFinanceRepository(ABC):
     ) -> FinanceTransaction: ...
 
     @abstractmethod
+    async def update_transaction_atomic(
+        self, transaction: FinanceTransaction, balance_updates: dict[str, Decimal]
+    ) -> FinanceTransaction: ...
+
+    @abstractmethod
     async def get_transaction_by_id(self, tx_id: str, owner_jid: str) -> FinanceTransaction | None: ...
 
     @abstractmethod

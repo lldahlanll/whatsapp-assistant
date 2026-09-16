@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from decimal import Decimal
 
 from whatsapp_platform.domain.entities.finance import AccountType
@@ -29,13 +30,14 @@ from whatsapp_platform.features.finance.service import (
 _HELP_TEXT = (
     "*PANDUAN PERINTAH FINANCE*\n"
     "━━━━━━━━━━━━━━━━━━\n"
-    "*Pemasukan:*\n"
+    "*Pemasukan / Tambah Saldo:*\n"
     "  `!finance masuk 5jt gaji`\n"
-    "  `!finance masuk 500rb freelance`\n"
+    "  `!finance tambah 500rb freelance`\n"
+    "  `!finance topup 100rb GoPay`\n"
     "\n"
     "*Pengeluaran:*\n"
     "  `!finance keluar 50rb makan siang`\n"
-    "  `!finance keluar 150k bensin`\n"
+    "  `!finance keluar 150k bensin BCA`\n"
     "\n"
     "*Transfer:*\n"
     "  `!finance transfer 100rb BCA BRI`\n"
@@ -57,7 +59,7 @@ _HELP_TEXT = (
     "  `!finance rekening baru GoPay ewallet 200rb`\n"
     "  `!finance rekening hapus BCA` — hapus rekening (perlu konfirmasi)\n"
     "  _Format baru: baru <nama> [tipe] [saldo_awal]_\n"
-    "  _Tipe: cash · bank · ewallet · savings · investment_\n"
+    "  _Tipe: cash · bank · ewallet · savings · deposit · investment_\n"
     "\n"
     "*Reset (Hapus Semua Data):*\n"
     "  `!finance reset` — preview data yang akan dihapus\n"
@@ -65,13 +67,12 @@ _HELP_TEXT = (
     "\n"
     "━━━━━━━━━━━━━━━━━━\n"
     "_Atau cukup ngobrol natural dengan Nara:_\n"
-    "  _'budget makan bulan ini 1 juta'_\n"
-    "  _'berapa sisa budget makan?'_\n"
-    "  _'tampilkan budget bulan ini'_\n"
+    "  _'buat rekening BCA dengan saldo awal 5 juta'_\n"
+    "  _'tambah saldo BCA 500rb'_\n"
     "  _'catat pengeluaran 50rb buat makan'_\n"
     "  _'berapa saldo aku sekarang?'_\n"
+    "  _'budget makan bulan ini 1 juta'_\n"
     "  _'laporan keuangan bulan ini'_\n"
-    "  _'buat rekening BCA dengan saldo awal 5 juta'_\n"
     "  _'hapus rekening BCA'_\n"
     "  _'reset semua data keuangan aku'_"
 )
@@ -105,7 +106,7 @@ class FinanceCommandHandler(BaseCommandHandler):
             if sub in ("saldo", "balance", "kas"):
                 await self._handle_balance(ctx, owner_jid)
 
-            elif sub in ("masuk", "income", "pemasukan", "in"):
+            elif sub in ("masuk", "income", "pemasukan", "in", "tambah", "topup", "top-up"):
                 await self._handle_income(ctx, owner_jid, rest)
 
             elif sub in ("keluar", "expense", "pengeluaran", "out"):
@@ -149,11 +150,38 @@ class FinanceCommandHandler(BaseCommandHandler):
         data = await self._svc.get_total_balance(owner_jid)
         await ctx.reply(format_balance(data))
 
+    async def _extract_account_and_clean_desc(
+        self, owner_jid: str, text: str, description: str | None
+    ) -> tuple[str | None, str | None]:
+        """Cari apakah nama salah satu rekening pengguna disebut di teks."""
+        accounts = await self._svc.get_accounts(owner_jid)
+        if not accounts:
+            return None, description
+
+        matched_account = None
+        for acc in accounts:
+            pattern = rf"\b{re.escape(acc.name)}\b"
+            if re.search(pattern, text, re.IGNORECASE):
+                matched_account = acc
+                break
+
+        if matched_account:
+            if description:
+                pattern = rf"(?:ke|dari|di)?\s*\b{re.escape(matched_account.name)}\b"
+                cleaned = re.sub(pattern, "", description, flags=re.IGNORECASE).strip()
+                description = cleaned or None
+            return matched_account.id, description
+
+        if len(accounts) == 1:
+            return accounts[0].id, description
+
+        return None, description
+
     async def _handle_income(
         self, ctx: CommandContext, owner_jid: str, rest: list[str]
     ) -> None:
         if not rest:
-            await ctx.reply("Contoh: `!finance masuk 5jt gaji bulan ini`")
+            await ctx.reply("Contoh: `!finance masuk 5jt gaji bulan ini` atau `!finance tambah 100rb BCA`")
             return
         text = " ".join(rest)
         amount = parse_amount_from_text(text)
@@ -163,10 +191,14 @@ class FinanceCommandHandler(BaseCommandHandler):
             )
             return
         description = parse_description_without_amount(text) or None
+        account_id, description = await self._extract_account_and_clean_desc(
+            owner_jid, text, description
+        )
         tx = await self._svc.add_income(
             owner_jid=owner_jid,
             amount=amount,
             description=description,
+            account_id=account_id,
         )
         await ctx.reply(format_transaction_added(tx))
 
@@ -184,10 +216,14 @@ class FinanceCommandHandler(BaseCommandHandler):
             )
             return
         description = parse_description_without_amount(text) or None
+        account_id, description = await self._extract_account_and_clean_desc(
+            owner_jid, text, description
+        )
         tx = await self._svc.add_expense(
             owner_jid=owner_jid,
             amount=amount,
             description=description,
+            account_id=account_id,
         )
         await ctx.reply(format_transaction_added(tx))
 
@@ -287,7 +323,7 @@ class FinanceCommandHandler(BaseCommandHandler):
             if len(rest) < 2:
                 await ctx.reply(
                     "Format: `!finance rekening baru <nama> [tipe] [saldo_awal]`\n"
-                    "Tipe: `cash`, `bank`, `ewallet`, `savings`, `investment`\n"
+                    "Tipe: `cash`, `bank`, `ewallet`, `savings`, `deposit`, `investment`\n"
                     "Contoh:\n"
                     "  `!finance rekening baru BCA bank 5jt`\n"
                     "  `!finance rekening baru GoPay ewallet 200rb`\n"
@@ -299,10 +335,11 @@ class FinanceCommandHandler(BaseCommandHandler):
             initial_balance = Decimal("0")
 
             type_map = {
-                "cash": AccountType.CASH, "kas": AccountType.CASH,
+                "cash": AccountType.CASH, "kas": AccountType.CASH, "tunai": AccountType.CASH, "fisik": AccountType.CASH,
                 "bank": AccountType.BANK,
                 "ewallet": AccountType.EWALLET, "dompet": AccountType.EWALLET,
                 "savings": AccountType.SAVINGS, "tabungan": AccountType.SAVINGS,
+                "deposit": AccountType.DEPOSIT, "deposito": AccountType.DEPOSIT,
                 "investment": AccountType.INVESTMENT, "investasi": AccountType.INVESTMENT,
             }
 

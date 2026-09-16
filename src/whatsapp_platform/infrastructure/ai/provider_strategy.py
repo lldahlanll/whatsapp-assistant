@@ -3,8 +3,8 @@
 Design:
 - IProviderStrategy is injected into AIService so it can be swapped later for
   cost-based or latency-based routing without touching the orchestrator.
-- FixedPriorityStrategy is the default: Gemini → Groq → OpenRouter.
-  It skips providers marked unavailable (all keys cooling or no keys configured).
+- FixedPriorityStrategy is the default: Groq → Gemini → OpenRouter.
+   It skips providers marked unavailable (all keys cooling or no keys configured).
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ class IProviderStrategy(ABC):
 class FixedPriorityStrategy(IProviderStrategy):
     """Default strategy: attempt providers in a fixed priority order.
 
-    Order: Gemini → Groq → OpenRouter (as specified in DEFAULT_PROVIDER_ORDER).
+    Order: Groq → Gemini → OpenRouter (as specified in DEFAULT_PROVIDER_ORDER).
     Providers absent from the available dict (e.g. not configured) are skipped.
 
     Future: swap this for a LatencyBasedStrategy or CostBasedStrategy by

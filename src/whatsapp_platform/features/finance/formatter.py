@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import calendar
+from datetime import date, datetime
 from decimal import Decimal
 
 from whatsapp_platform.domain.entities.finance import (
@@ -21,13 +22,53 @@ def _fmt(amount: Decimal) -> str:
 
 def format_balance(data: dict) -> str:
     accounts: list[dict] = data.get("accounts", [])
+    if not accounts:
+        return (
+            "*Saldo Rekening*\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "Belum ada rekening/dompet terdaftar.\n\n"
+            "Gunakan perintah berikut untuk membuat rekening:\n"
+            "  `!finance rekening baru <nama> [tipe] [saldo_awal]`\n"
+            "Contoh: `!finance rekening baru BCA bank 1jt`"
+        )
+
     total: Decimal = data.get("total", Decimal("0"))
 
-    lines = ["*Saldo Rekening*", "━━━━━━━━━━━━━━━━━━"]
-    for acc in accounts:
-        lines.append(f"• *{acc['name']}*: {_fmt(acc['balance'])}")
+    available_accs = [
+        a
+        for a in accounts
+        if a.get("classification") == "available"
+        or (a.get("type", "bank").lower() in ("cash", "bank", "ewallet", "savings"))
+    ]
+    investment_accs = [
+        a
+        for a in accounts
+        if a.get("classification") == "investment"
+        or (a.get("type", "").lower() in ("deposit", "investment"))
+    ]
 
-    lines += ["━━━━━━━━━━━━━━━━━━", f"*Total: {_fmt(total)}*"]
+    lines = ["*Saldo Rekening*", "━━━━━━━━━━━━━━━━━━"]
+    if investment_accs and available_accs:
+        lines.append("*Saldo Tersedia:*")
+        for acc in available_accs:
+            lines.append(f"• *{acc['name']}*: {_fmt(acc['balance'])}")
+
+        lines.append("")
+        lines.append("*Investasi:*")
+        for acc in investment_accs:
+            lines.append(f"• *{acc['name']}*: {_fmt(acc['balance'])}")
+
+        lines += ["━━━━━━━━━━━━━━━━━━", f"*Total Aset: {_fmt(total)}*"]
+    elif investment_accs and not available_accs:
+        lines.append("*Investasi:*")
+        for acc in investment_accs:
+            lines.append(f"• *{acc['name']}*: {_fmt(acc['balance'])}")
+        lines += ["━━━━━━━━━━━━━━━━━━", f"*Total Aset: {_fmt(total)}*"]
+    else:
+        for acc in accounts:
+            lines.append(f"• *{acc['name']}*: {_fmt(acc['balance'])}")
+        lines += ["━━━━━━━━━━━━━━━━━━", f"*Total: {_fmt(total)}*"]
+
     return "\n".join(lines)
 
 
@@ -65,30 +106,67 @@ def format_transaction_added(tx: FinanceTransaction) -> str:
     return "\n".join(lines)
 
 
+MONTH_ABBR_ID = [
+    "", "Jan", "Feb", "Mar", "Apr", "Mei", "Jun",
+    "Jul", "Agu", "Sep", "Okt", "Nov", "Des"
+]
+
+
+def format_tx_date(val: datetime | date | str | None, include_year: bool = False) -> str:
+    """Format tanggal ke format Indonesia ringkas, misal '14 Sep'."""
+    if not val:
+        return ""
+    if hasattr(val, "day") and hasattr(val, "month"):
+        day = val.day
+        month = val.month
+        mon_str = MONTH_ABBR_ID[month] if 1 <= month <= 12 else str(month)
+        if include_year and hasattr(val, "year"):
+            return f"{day} {mon_str} {val.year}"
+        return f"{day} {mon_str}"
+    if isinstance(val, str):
+        parts = val.split("T")[0].split("-")
+        if len(parts) == 3:
+            try:
+                year, month, day = int(parts[0]), int(parts[1]), int(parts[2])
+                mon_str = MONTH_ABBR_ID[month] if 1 <= month <= 12 else str(month)
+                if include_year:
+                    return f"{day} {mon_str} {year}"
+                return f"{day} {mon_str}"
+            except ValueError:
+                pass
+        return val
+    return str(val)
+
+
 def format_transactions_list(
     transactions: list[FinanceTransaction], title: str = "Riwayat Transaksi"
 ) -> str:
     if not transactions:
         return "Belum ada transaksi yang tercatat."
 
-    lines = [f"*{title}*", "━━━━━━━━━━━━━━━━━━"]
+    clean_title = title.strip("*").upper()
+    header = f"📜 *{clean_title}*"
+    items = []
     for tx in transactions:
-        date_str = tx.transaction_date.strftime("%d/%m")
+        amt_num = _fmt(tx.amount)
         if tx.transaction_type == TransactionType.INCOME:
-            amt = f"+{_fmt(tx.amount)}"
+            icon = "🟢"
+            amt_str = f"{icon} *+{amt_num}*"
         elif tx.transaction_type == TransactionType.EXPENSE:
-            amt = f"-{_fmt(tx.amount)}"
+            icon = "🔴"
+            amt_str = f"{icon} *-{amt_num}*"
         else:
-            amt = f"{_fmt(tx.amount)}"
+            icon = "🔵"
+            amt_str = f"{icon} *{amt_num}*"
 
         desc = tx.description or tx.category_name or "—"
-        if len(desc) > 22:
-            desc = desc[:20] + "…"
-        lines.append(f"• `{date_str}` {desc} — *{amt}*")
+        date_str = format_tx_date(tx.transaction_date)
+        acc_str = f" ({tx.account_name})" if tx.account_name else ""
+        detail = f"{desc}{acc_str}"
 
-    lines.append("━━━━━━━━━━━━━━━━━━")
-    lines.append(f"_Total: {len(transactions)} transaksi_")
-    return "\n".join(lines)
+        items.append(f"• {date_str} | {amt_str} | {detail}")
+
+    return f"{header}\n\n" + "\n".join(items)
 
 
 def format_monthly_report(summary: MonthlySummary) -> str:
@@ -123,9 +201,25 @@ def format_accounts_list(accounts: list[FinanceAccount]) -> str:
     if not accounts:
         return "Belum ada rekening. Gunakan `!finance rekening baru <nama>` untuk membuat."
 
+    available_accs = [a for a in accounts if a.is_available_balance]
+    investment_accs = [a for a in accounts if a.is_investment]
+
     lines = ["*Daftar Rekening*", "━━━━━━━━━━━━━━━━━━"]
-    for acc in accounts:
-        lines.append(f"• *{acc.name}* — {_fmt(acc.balance)}")
+    if investment_accs and available_accs:
+        lines.append("*Saldo Tersedia:*")
+        for acc in available_accs:
+            lines.append(f"• *{acc.name}* ({acc.account_type.value}) — {_fmt(acc.balance)}")
+        lines.append("")
+        lines.append("*Investasi:*")
+        for acc in investment_accs:
+            lines.append(f"• *{acc.name}* ({acc.account_type.value}) — {_fmt(acc.balance)}")
+    elif investment_accs and not available_accs:
+        lines.append("*Investasi:*")
+        for acc in investment_accs:
+            lines.append(f"• *{acc.name}* ({acc.account_type.value}) — {_fmt(acc.balance)}")
+    else:
+        for acc in accounts:
+            lines.append(f"• *{acc.name}* ({acc.account_type.value}) — {_fmt(acc.balance)}")
     return "\n".join(lines)
 
 

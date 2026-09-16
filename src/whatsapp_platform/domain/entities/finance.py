@@ -19,7 +19,33 @@ class AccountType(str, Enum):
     BANK = "bank"
     EWALLET = "ewallet"
     SAVINGS = "savings"
+    DEPOSIT = "deposit"
     INVESTMENT = "investment"
+
+    @property
+    def is_available(self) -> bool:
+        return self in AVAILABLE_ACCOUNT_TYPES
+
+    @property
+    def is_investment(self) -> bool:
+        return self in INVESTMENT_ACCOUNT_TYPES
+
+    @property
+    def classification(self) -> str:
+        return "available" if self.is_available else "investment"
+
+
+AVAILABLE_ACCOUNT_TYPES: frozenset[AccountType] = frozenset({
+    AccountType.CASH,
+    AccountType.BANK,
+    AccountType.EWALLET,
+    AccountType.SAVINGS,
+})
+
+INVESTMENT_ACCOUNT_TYPES: frozenset[AccountType] = frozenset({
+    AccountType.DEPOSIT,
+    AccountType.INVESTMENT,
+})
 
 
 class CategoryType(str, Enum):
@@ -37,6 +63,18 @@ class FinanceAccount:
     balance: Decimal
     is_active: bool
     created_at: datetime
+
+    @property
+    def is_available_balance(self) -> bool:
+        return self.account_type.is_available
+
+    @property
+    def is_investment(self) -> bool:
+        return self.account_type.is_investment
+
+    @property
+    def classification(self) -> str:
+        return self.account_type.classification
 
 
 @dataclass

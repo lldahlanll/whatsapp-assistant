@@ -89,10 +89,11 @@ def test_finance_query_fast_path_get_transactions():
     })
     result = try_finance_mutation_fast_path("finance_get_transactions", raw_res)
     assert result is not None
-    assert "Riwayat Transaksi" in result
-    assert "Rp 50.000" in result
-    assert "Rp 1.000.000" in result
-    assert "TX01" in result
+    assert "RIWAYAT TRANSAKSI" in result
+    assert "🔴 *-Rp 50.000*" in result
+    assert "🟢 *+Rp 1.000.000*" in result
+    assert "• 3 Sep | 🔴 *-Rp 50.000* | Makan siang (BCA)" in result
+    assert "• 2 Sep | 🟢 *+Rp 1.000.000* | Gaji (Mandiri)" in result
 
 
 def test_finance_query_fast_path_get_balance():
@@ -224,3 +225,17 @@ async def test_p1_scenario_max_tool_iterations_enforced():
     assert mock_provider.generate_with_tools.call_count == 3
     assert mock_provider.generate.call_count == 1
     assert "Forced final text response" in res.text
+
+
+def test_select_tools_account_create():
+    """Verify that messages like 'tambah rekening baru ... saldo awal ...' select finance_create_account."""
+    from whatsapp_platform.infrastructure.ai.tool_policy import select_tools
+
+    text = "tambah rekening baru BANK BCA dengan saldo awal 3.700.000"
+    tools = select_tools("finance", text)
+    tool_names = [t.name for t in tools] if tools else []
+
+    assert "finance_create_account" in tool_names
+    assert "finance_get_accounts" in tool_names
+    # Shouldn't just be finance_get_balance alone
+    assert len(tool_names) > 1

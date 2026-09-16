@@ -105,6 +105,7 @@ class Container(IContainer):
         from whatsapp_platform.features.ai.config_store import AIChatConfigStore
         from whatsapp_platform.features.ai.rate_guard import PerChatRateGuard
         from whatsapp_platform.infrastructure.ai.ai_service import AIService
+        from whatsapp_platform.infrastructure.ai.constants import DEFAULT_PROVIDER_ORDER
         from whatsapp_platform.infrastructure.ai.interfaces import ILLMProvider
         from whatsapp_platform.infrastructure.ai.key_pool import KeyPool
         from whatsapp_platform.infrastructure.ai.provider_strategy import FixedPriorityStrategy
@@ -151,7 +152,7 @@ class Container(IContainer):
             )
             providers_map["openrouter"] = (openrouter_adapter, openrouter_pool)
 
-        strategy = FixedPriorityStrategy(["gemini", "groq", "openrouter"])
+        strategy = FixedPriorityStrategy(DEFAULT_PROVIDER_ORDER)
         ai_service = AIService(
             providers=providers_map,
             strategy=strategy,

@@ -285,7 +285,13 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
                         acc_m.balance = new_bal
 
             await session.refresh(model)
-            return _transaction_from_model(model)
+            return _transaction_from_model(
+                model,
+                account_name=transaction.account_name,
+                category_name=transaction.category_name,
+                category_icon=transaction.category_icon,
+                transfer_to_account_name=transaction.transfer_to_account_name,
+            )
 
     async def reverse_transaction_atomic(
         self, original_tx_id: str, owner_jid: str, reversal_tx: FinanceTransaction, balance_updates: dict[str, Decimal]
@@ -328,7 +334,54 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
                         acc_m.balance = new_bal
 
             await session.refresh(rev_model)
-            return _transaction_from_model(rev_model)
+            return _transaction_from_model(
+                rev_model,
+                account_name=reversal_tx.account_name,
+                category_name=reversal_tx.category_name,
+                category_icon=reversal_tx.category_icon,
+                transfer_to_account_name=reversal_tx.transfer_to_account_name,
+            )
+
+    async def update_transaction_atomic(
+        self, transaction: FinanceTransaction, balance_updates: dict[str, Decimal]
+    ) -> FinanceTransaction:
+        async with self._session() as session:
+            async with session.begin():
+                result = await session.execute(
+                    select(FinanceTransactionModel).where(
+                        (FinanceTransactionModel.id == transaction.id)
+                        | (FinanceTransactionModel.human_tx_id == transaction.human_tx_id),
+                        FinanceTransactionModel.owner_jid == transaction.owner_jid,
+                    )
+                )
+                model = result.scalar_one_or_none()
+                if not model:
+                    raise ValueError(f"Transaction '{transaction.id}' not found for update.")
+
+                model.amount = transaction.amount
+                model.description = transaction.description
+                model.category_id = transaction.category_id
+                model.account_id = transaction.account_id
+                model.transfer_to_account_id = transaction.transfer_to_account_id
+                if transaction.transaction_date:
+                    model.transaction_date = transaction.transaction_date
+
+                for acc_id, new_bal in balance_updates.items():
+                    acc_result = await session.execute(
+                        select(FinanceAccountModel).where(FinanceAccountModel.id == acc_id)
+                    )
+                    acc_m = acc_result.scalar_one_or_none()
+                    if acc_m:
+                        acc_m.balance = new_bal
+
+            await session.refresh(model)
+            return _transaction_from_model(
+                model,
+                account_name=transaction.account_name,
+                category_name=transaction.category_name,
+                category_icon=transaction.category_icon,
+                transfer_to_account_name=transaction.transfer_to_account_name,
+            )
 
     async def get_transaction_by_id(self, tx_id: str, owner_jid: str) -> FinanceTransaction | None:
         async with self._session() as session:
@@ -404,7 +457,9 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
     ) -> list[FinanceTransaction]:
         async with self._session() as session:
             q = select(FinanceTransactionModel).where(
-                FinanceTransactionModel.owner_jid == owner_jid
+                FinanceTransactionModel.owner_jid == owner_jid,
+                FinanceTransactionModel.is_reversed.is_(False),
+                FinanceTransactionModel.reversal_of_id.is_(None),
             )
             if account_id:
                 q = q.where(FinanceTransactionModel.account_id == account_id)
@@ -456,6 +511,7 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
             q = select(FinanceTransactionModel).where(
                 FinanceTransactionModel.owner_jid == owner_jid,
                 FinanceTransactionModel.is_reversed.is_(False),
+                FinanceTransactionModel.reversal_of_id.is_(None),
             )
             if keyword:
                 pattern = f"%{keyword}%"
@@ -563,6 +619,8 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
                 FinanceTransactionModel.owner_jid == owner_jid,
                 FinanceTransactionModel.transaction_date >= start,
                 FinanceTransactionModel.transaction_date <= end,
+                FinanceTransactionModel.is_reversed.is_(False),
+                FinanceTransactionModel.reversal_of_id.is_(None),
             )
             if account_id:
                 q = q.where(FinanceTransactionModel.account_id == account_id)
@@ -609,6 +667,8 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
                     FinanceTransactionModel.owner_jid == owner_jid,
                     FinanceTransactionModel.transaction_date >= start,
                     FinanceTransactionModel.transaction_date < end,
+                    FinanceTransactionModel.is_reversed.is_(False),
+                    FinanceTransactionModel.reversal_of_id.is_(None),
                 ).group_by(FinanceTransactionModel.transaction_type)
             )
             rows = result.all()
@@ -646,6 +706,8 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
                     FinanceTransactionModel.transaction_type == TransactionType.EXPENSE.value,
                     FinanceTransactionModel.transaction_date >= start,
                     FinanceTransactionModel.transaction_date < end,
+                    FinanceTransactionModel.is_reversed.is_(False),
+                    FinanceTransactionModel.reversal_of_id.is_(None),
                 ).group_by(FinanceTransactionModel.category_id)
                 .order_by(func.sum(FinanceTransactionModel.amount).desc())
             )
@@ -827,6 +889,8 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
                     FinanceTransactionModel.transaction_type == TransactionType.EXPENSE.value,
                     FinanceTransactionModel.transaction_date >= start,
                     FinanceTransactionModel.transaction_date < end,
+                    FinanceTransactionModel.is_reversed.is_(False),
+                    FinanceTransactionModel.reversal_of_id.is_(None),
                 )
             )
             total_spent_val = result.scalar() or 0
@@ -869,6 +933,8 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
                     FinanceTransactionModel.transaction_type == TransactionType.EXPENSE.value,
                     FinanceTransactionModel.transaction_date >= start,
                     FinanceTransactionModel.transaction_date < end,
+                    FinanceTransactionModel.is_reversed.is_(False),
+                    FinanceTransactionModel.reversal_of_id.is_(None),
                 ).group_by(FinanceTransactionModel.category_id)
             )
             spent_map = {

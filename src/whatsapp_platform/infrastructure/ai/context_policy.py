@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from whatsapp_platform.infrastructure.ai.constants import (
+    AI_FINANCE_GROUP_SYSTEM_PROMPT,
     AI_FINANCE_SYSTEM_PROMPT,
     AI_FULL_SYSTEM_PROMPT,
     AI_NETWORK_SYSTEM_PROMPT,
@@ -39,6 +40,7 @@ class ContextPolicyManager:
         text: str,
         settings: Settings,
         tools_enabled: bool = True,
+        is_group: bool = False,
     ) -> ContextPolicy:
         """Menentukan instruksi, jumlah riwayat pesan, dan alat yang dibutuhkan AI."""
         # Determine history limit from env settings
@@ -59,7 +61,7 @@ class ContextPolicyManager:
         if intent in ("simple_chat", "chat"):
             system_prompt = AI_SYSTEM_PROMPT
         elif intent == "finance":
-            system_prompt = AI_FINANCE_SYSTEM_PROMPT
+            system_prompt = AI_FINANCE_GROUP_SYSTEM_PROMPT if is_group else AI_FINANCE_SYSTEM_PROMPT
         elif intent == "network":
             system_prompt = AI_NETWORK_SYSTEM_PROMPT
         elif intent == "full":

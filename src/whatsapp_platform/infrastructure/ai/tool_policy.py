@@ -56,11 +56,16 @@ def _select_finance_tools(lower: str) -> list[ToolDefinition]:
     ))
     is_mutation = any(kw in lower for kw in (
         "catat", "catet", "bayar", "beli", "transfer", "pengeluaran",
-        "pemasukan", "gaji", "belanja", "kirim",
+        "pemasukan", "gaji", "belanja", "kirim", "keluar", "masuk",
+        "top up", "topup", "top-up", "isi saldo", "tambah saldo",
+        "tambahkan saldo", "tambah uang", "tambahkan uang", "isi ulang",
+        "setor", "setor tunai", "deposit", "masukin", "masukkan",
     ))
     is_report = any(kw in lower for kw in ("rekap", "laporan", "summary", "bulan ini"))
     is_account_create = any(kw in lower for kw in (
-        "buat rekening", "tambah akun", "buka rekening", "bikin dompet", "bikin rekening",
+        "buat rekening", "bikin rekening", "tambah rekening", "tambahkan rekening",
+        "rekening baru", "buka rekening", "buat akun", "bikin akun", "tambah akun",
+        "tambahkan akun", "akun baru", "buka akun", "bikin dompet", "tambah dompet",
     ))
     is_modify_or_delete = any(kw in lower for kw in (
         "hapus", "ubah", "koreksi", "edit", "salah", "batalkan", "cancel", "ganti",
@@ -68,16 +73,31 @@ def _select_finance_tools(lower: str) -> list[ToolDefinition]:
     is_account_query = any(kw in lower for kw in (
         "daftar rekening", "daftar akun", "akun apa", "rekening apa",
         "dompet apa", "akun saya", "rekening saya", "punya rekening",
+        "list rekening", "lihat rekening", "cek rekening",
     ))
     is_balance_query = any(kw in lower for kw in (
         "saldo", "berapa uang", "berapa duit", "berapa sisa", "cek saldo",
+    ))
+    is_confirmation = any(kw == lower.strip() or kw in lower.split() for kw in (
+        "ya", "iya", "y", "yes", "oke", "ok", "lanjut", "lanjutkan",
+        "yakin", "benar", "betul", "setuju", "hapus"
     ))
     is_kategori_query = any(kw in lower for kw in ("kategori", "kategori apa"))
 
     names: list[str] = []
 
-    if is_reset:
+    if is_confirmation:
+        names = [
+            "finance_delete_account",
+            "finance_delete_transaction",
+            "finance_reset_data",
+            "finance_get_accounts",
+            "finance_get_balance",
+        ]
+    elif is_reset:
         names = ["finance_reset_data"]
+    elif is_account_create:
+        names = ["finance_create_account", "finance_get_accounts", "finance_get_balance"]
     elif is_budget:
         names = [
             "finance_create_budget",
@@ -122,8 +142,6 @@ def _select_finance_tools(lower: str) -> list[ToolDefinition]:
             "finance_get_balance",
             "finance_list_budgets",
         ]
-    elif is_account_create:
-        names = ["finance_create_account", "finance_get_accounts", "finance_get_balance"]
     elif is_balance_query:
         names = ["finance_get_balance"]
     else:

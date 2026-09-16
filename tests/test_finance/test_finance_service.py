@@ -345,3 +345,147 @@ async def test_delete_account_by_name(mock_repo: AsyncMock, owner_jid: str) -> N
     with pytest.raises(AccountNotFoundError):
         await svc.delete_account(owner_jid, "Mandiri")
 
+
+@pytest.mark.asyncio
+async def test_correct_expense_updates_in_place_and_adjusts_balance(mock_repo: AsyncMock, owner_jid: str) -> None:
+    svc = FinanceService(mock_repo)
+    acc = FinanceAccount(
+        id="acc-bca-1",
+        owner_jid=owner_jid,
+        name="BCA",
+        account_type=AccountType.BANK,
+        currency="IDR",
+        balance=Decimal("450000"),
+        is_active=True,
+        created_at=None,  # type: ignore[arg-type]
+    )
+    orig_tx = FinanceTransaction(
+        id="tx-101",
+        human_tx_id="TXN-20260913-000101",
+        owner_jid=owner_jid,
+        account_id=acc.id,
+        transaction_type=TransactionType.EXPENSE,
+        amount=Decimal("50000"),
+        category_id=None,
+        description="Makan siang",
+        transaction_date=None,  # type: ignore[arg-type]
+        transfer_to_account_id=None,
+        is_reversed=False,
+        reversal_of_id=None,
+        created_at=None,  # type: ignore[arg-type]
+        account_name="BCA",
+    )
+    mock_repo.get_transaction_by_id.return_value = orig_tx
+    mock_repo.get_account_by_id.return_value = acc
+
+    def fake_update(transaction, balance_updates):
+        return transaction
+
+    mock_repo.update_transaction_atomic.side_effect = fake_update
+
+    # Edit from 50,000 to 20,000 (refund 30,000)
+    result = await svc.correct_transaction(
+        owner_jid=owner_jid,
+        original_tx_id=orig_tx.id,
+        new_amount=Decimal("20000"),
+        new_description="Makan siang hemat",
+    )
+
+    assert result.id == orig_tx.id
+    assert result.human_tx_id == orig_tx.human_tx_id
+    assert result.amount == Decimal("20000")
+    assert result.description == "Makan siang hemat"
+
+    mock_repo.update_transaction_atomic.assert_called_once()
+    balance_updates = mock_repo.update_transaction_atomic.call_args[1]["balance_updates"]
+    # 450,000 + (50,000 - 20,000) = 480,000
+    assert balance_updates[acc.id] == Decimal("480000")
+
+
+@pytest.mark.asyncio
+async def test_correct_expense_increase_adjusts_balance(mock_repo: AsyncMock, owner_jid: str) -> None:
+    svc = FinanceService(mock_repo)
+    acc = FinanceAccount(
+        id="acc-bca-1",
+        owner_jid=owner_jid,
+        name="BCA",
+        account_type=AccountType.BANK,
+        currency="IDR",
+        balance=Decimal("450000"),
+        is_active=True,
+        created_at=None,  # type: ignore[arg-type]
+    )
+    orig_tx = FinanceTransaction(
+        id="tx-101",
+        human_tx_id="TXN-20260913-000101",
+        owner_jid=owner_jid,
+        account_id=acc.id,
+        transaction_type=TransactionType.EXPENSE,
+        amount=Decimal("50000"),
+        category_id=None,
+        description="Makan siang",
+        transaction_date=None,  # type: ignore[arg-type]
+        transfer_to_account_id=None,
+        is_reversed=False,
+        reversal_of_id=None,
+        created_at=None,  # type: ignore[arg-type]
+        account_name="BCA",
+    )
+    mock_repo.get_transaction_by_id.return_value = orig_tx
+    mock_repo.get_account_by_id.return_value = acc
+
+    mock_repo.update_transaction_atomic.side_effect = lambda transaction, balance_updates: transaction
+
+    # Edit from 50,000 to 80,000 (deduct extra 30,000)
+    result = await svc.correct_transaction(
+        owner_jid=owner_jid,
+        original_tx_id=orig_tx.id,
+        new_amount=Decimal("80000"),
+    )
+
+    assert result.amount == Decimal("80000")
+    balance_updates = mock_repo.update_transaction_atomic.call_args[1]["balance_updates"]
+    # 450,000 - 30,000 = 420,000
+    assert balance_updates[acc.id] == Decimal("420000")
+
+
+@pytest.mark.asyncio
+async def test_correct_expense_insufficient_balance(mock_repo: AsyncMock, owner_jid: str) -> None:
+    svc = FinanceService(mock_repo)
+    acc = FinanceAccount(
+        id="acc-bca-1",
+        owner_jid=owner_jid,
+        name="BCA",
+        account_type=AccountType.BANK,
+        currency="IDR",
+        balance=Decimal("50000"),
+        is_active=True,
+        created_at=None,  # type: ignore[arg-type]
+    )
+    orig_tx = FinanceTransaction(
+        id="tx-101",
+        human_tx_id="TXN-20260913-000101",
+        owner_jid=owner_jid,
+        account_id=acc.id,
+        transaction_type=TransactionType.EXPENSE,
+        amount=Decimal("50000"),
+        category_id=None,
+        description="Makan siang",
+        transaction_date=None,  # type: ignore[arg-type]
+        transfer_to_account_id=None,
+        is_reversed=False,
+        reversal_of_id=None,
+        created_at=None,  # type: ignore[arg-type]
+        account_name="BCA",
+    )
+    mock_repo.get_transaction_by_id.return_value = orig_tx
+    mock_repo.get_account_by_id.return_value = acc
+
+    # 50,000 current + 50,000 orig = 100,000 max. Asking for 150,000 should raise InsufficientBalanceError
+    with pytest.raises(InsufficientBalanceError):
+        await svc.correct_transaction(
+            owner_jid=owner_jid,
+            original_tx_id=orig_tx.id,
+            new_amount=Decimal("150000"),
+        )
+

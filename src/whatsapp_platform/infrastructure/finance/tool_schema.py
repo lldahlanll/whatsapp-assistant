@@ -9,8 +9,8 @@ FINANCE_TOOLS: list[ToolDefinition] = [
         name="finance_add_income",
         description=(
             "Mencatat pemasukan / pendapatan ke rekening keuangan pribadi pengguna. "
-            "Gunakan ketika pengguna menyebutkan gaji masuk, terima uang, dapat transfer, "
-            "freelance dibayar, bonus, dll."
+            "Gunakan ketika pengguna ingin menambah saldo, isi saldo, top up, mencatat gaji, "
+            "terima uang, dapat transfer, freelance dibayar, bonus, dll."
         ),
         parameters=[
             ToolParameter(
@@ -267,7 +267,7 @@ FINANCE_TOOLS: list[ToolDefinition] = [
             ToolParameter(
                 name="account_type",
                 type="string",
-                description="Tipe rekening: 'cash', 'bank', 'ewallet', 'savings', atau 'investment'. Default 'bank'.",
+                description="Tipe rekening: 'cash', 'bank', 'ewallet', 'savings', 'deposit', atau 'investment'. Default 'bank'.",
                 required=False,
             ),
             ToolParameter(

@@ -26,6 +26,26 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 
+GROUP_BLOCKED_TOOLS: set[str] = {
+    "finance_get_balance",
+    "finance_get_monthly_report",
+    "finance_get_transactions",
+    "finance_get_expense_summary",
+    "finance_create_account",
+    "finance_delete_account",
+    "finance_get_accounts",
+    "finance_get_categories",
+    "finance_get_transaction_detail",
+    "finance_update_transaction",
+    "finance_delete_transaction",
+    "finance_create_budget",
+    "finance_get_budget",
+    "finance_list_budgets",
+    "finance_delete_budget",
+    "finance_reset_data",
+}
+
+
 class FinanceToolExecutor:
     def __init__(self, finance_service: FinanceService) -> None:
         self._svc = finance_service
@@ -38,70 +58,85 @@ class FinanceToolExecutor:
         chat_jid: JID,
     ) -> str:
         owner_jid = str(user_jid)
+        is_group = False
+        if hasattr(chat_jid, "is_group"):
+            is_group = bool(chat_jid.is_group)
+        elif isinstance(chat_jid, str) and chat_jid.endswith("@g.us"):
+            is_group = True
+
         logger.info(
             "Executing finance tool call",
             tool=tool_name,
             arguments=arguments,
             owner=owner_jid,
+            is_group=is_group,
         )
+
+        if is_group and tool_name in GROUP_BLOCKED_TOOLS:
+            logger.info("Blocked finance tool in group chat", tool=tool_name, owner=owner_jid)
+            return json.dumps({
+                "status": "error",
+                "error_code": "GROUP_PRIVATE_ONLY",
+                "message": "Data keuangan pribadi hanya dapat dilihat di chat private. Silakan hubungi saya lewat chat pribadi.",
+            }, ensure_ascii=False)
 
         try:
             if tool_name == "finance_add_income":
-                return await self._add_income(owner_jid, arguments)
+                result = await self._add_income(owner_jid, arguments)
 
             elif tool_name == "finance_add_expense":
-                return await self._add_expense(owner_jid, arguments)
+                result = await self._add_expense(owner_jid, arguments)
 
             elif tool_name == "finance_transfer":
-                return await self._transfer(owner_jid, arguments)
+                result = await self._transfer(owner_jid, arguments)
 
             elif tool_name == "finance_get_balance":
-                return await self._get_balance(owner_jid)
+                result = await self._get_balance(owner_jid)
 
             elif tool_name == "finance_get_monthly_report":
-                return await self._get_monthly_report(owner_jid, arguments)
+                result = await self._get_monthly_report(owner_jid, arguments)
 
             elif tool_name == "finance_get_transactions":
-                return await self._get_transactions(owner_jid, arguments)
+                result = await self._get_transactions(owner_jid, arguments)
 
             elif tool_name == "finance_get_expense_summary":
-                return await self._get_expense_summary(owner_jid, arguments)
+                result = await self._get_expense_summary(owner_jid, arguments)
 
             elif tool_name == "finance_create_account":
-                return await self._create_account(owner_jid, arguments)
+                result = await self._create_account(owner_jid, arguments)
 
             elif tool_name == "finance_delete_account":
-                return await self._delete_account(owner_jid, arguments)
+                result = await self._delete_account(owner_jid, arguments)
 
             elif tool_name == "finance_get_accounts":
-                return await self._get_accounts(owner_jid)
+                result = await self._get_accounts(owner_jid)
 
             elif tool_name == "finance_get_categories":
-                return await self._get_categories(owner_jid, arguments)
+                result = await self._get_categories(owner_jid, arguments)
 
             elif tool_name == "finance_get_transaction_detail":
-                return await self._get_transaction_detail(owner_jid, arguments)
+                result = await self._get_transaction_detail(owner_jid, arguments)
 
             elif tool_name == "finance_update_transaction":
-                return await self._update_transaction(owner_jid, arguments)
+                result = await self._update_transaction(owner_jid, arguments)
 
             elif tool_name == "finance_delete_transaction":
-                return await self._delete_transaction(owner_jid, arguments)
+                result = await self._delete_transaction(owner_jid, arguments)
 
             elif tool_name == "finance_create_budget":
-                return await self._create_budget(owner_jid, arguments)
+                result = await self._create_budget(owner_jid, arguments)
 
             elif tool_name == "finance_get_budget":
-                return await self._get_budget(owner_jid, arguments)
+                result = await self._get_budget(owner_jid, arguments)
 
             elif tool_name == "finance_list_budgets":
-                return await self._list_budgets(owner_jid, arguments)
+                result = await self._list_budgets(owner_jid, arguments)
 
             elif tool_name == "finance_delete_budget":
-                return await self._delete_budget(owner_jid, arguments)
+                result = await self._delete_budget(owner_jid, arguments)
 
             elif tool_name == "finance_reset_data":
-                return await self._reset_data(owner_jid, arguments)
+                result = await self._reset_data(owner_jid, arguments)
 
             else:
                 return json.dumps({
@@ -109,6 +144,25 @@ class FinanceToolExecutor:
                     "error_code": "INVALID_TOOL",
                     "message": f"Tool '{tool_name}' tidak dikenali.",
                 }, ensure_ascii=False)
+
+            if is_group:
+                try:
+                    data = json.loads(result)
+                    if isinstance(data, dict):
+                        data.pop("new_balance", None)
+                        data.pop("balance", None)
+                        data.pop("from_new_balance", None)
+                        data.pop("to_new_balance", None)
+                        if isinstance(data.get("transaction"), dict):
+                            data["transaction"].pop("new_balance", None)
+                            data["transaction"].pop("balance", None)
+                            data["transaction"].pop("from_new_balance", None)
+                            data["transaction"].pop("to_new_balance", None)
+                        result = json.dumps(data, ensure_ascii=False)
+                except Exception:
+                    pass
+
+            return result
 
         except AccountNotFoundError as exc:
             return json.dumps({
@@ -207,6 +261,7 @@ class FinanceToolExecutor:
             "amount": float(amount),
             "account_name": tx.account_name,
             "category": tx.category_name,
+            "category_name": tx.category_name,
             "description": tx.description,
             "new_balance": float(current_acc.balance) if current_acc else None,
             "message": (
@@ -250,6 +305,7 @@ class FinanceToolExecutor:
             "amount": float(amount),
             "account_name": tx.account_name,
             "category": tx.category_name,
+            "category_name": tx.category_name,
             "description": tx.description,
             "new_balance": float(current_acc.balance) if current_acc else None,
             "message": (
@@ -304,12 +360,15 @@ class FinanceToolExecutor:
         return json.dumps({
             "status": "success",
             "total_balance": float(data["total"]),
+            "available_balance": float(data.get("available_balance", data["total"])),
+            "investment_balance": float(data.get("investment_balance", 0)),
             "currency": "IDR",
             "accounts": [
                 {
                     "name": a["name"],
                     "balance": float(a["balance"]),
                     "type": a["type"],
+                    "classification": a.get("classification", "available"),
                 }
                 for a in data["accounts"]
             ],
@@ -429,10 +488,11 @@ class FinanceToolExecutor:
         name = args["name"]
         raw_type = (args.get("account_type") or "bank").lower()
         type_map = {
-            "cash": AccountType.CASH, "kas": AccountType.CASH,
+            "cash": AccountType.CASH, "kas": AccountType.CASH, "tunai": AccountType.CASH, "fisik": AccountType.CASH,
             "bank": AccountType.BANK,
             "ewallet": AccountType.EWALLET, "dompet": AccountType.EWALLET,
             "savings": AccountType.SAVINGS, "tabungan": AccountType.SAVINGS,
+            "deposit": AccountType.DEPOSIT, "deposito": AccountType.DEPOSIT,
             "investment": AccountType.INVESTMENT, "investasi": AccountType.INVESTMENT,
         }
         acc_type = type_map.get(raw_type, AccountType.BANK)
@@ -578,13 +638,47 @@ class FinanceToolExecutor:
         }, ensure_ascii=False)
 
     async def _update_transaction(self, owner_jid: str, args: dict) -> str:
-        tx_id: str = args["transaction_id"]
-        new_amount_raw = args.get("new_amount")
-        new_amount = Decimal(str(new_amount_raw)) if new_amount_raw is not None else None
+        tx_id: str = args.get("transaction_id") or args.get("tx_id") or args.get("id", "")
+        if not tx_id:
+            return json.dumps({
+                "status": "error",
+                "error_code": "INVALID_ARGUMENT",
+                "message": "Parameter transaction_id wajib diisi.",
+            }, ensure_ascii=False)
+
+        # Parse amount flexibly
+        new_amount_raw = (
+            args.get("new_amount")
+            if args.get("new_amount") is not None
+            else args.get("amount")
+        )
+        if new_amount_raw is None:
+            new_amount_raw = args.get("nominal")
+
+        new_amount = None
+        if new_amount_raw is not None:
+            if isinstance(new_amount_raw, (int, float, Decimal)):
+                new_amount = Decimal(str(new_amount_raw))
+            else:
+                s = str(new_amount_raw).strip()
+                from whatsapp_platform.features.finance.parser import parse_amount_from_text
+                parsed = parse_amount_from_text(s)
+                if parsed is not None:
+                    new_amount = parsed
+                else:
+                    clean = s.replace(".", "").replace(",", "").replace("Rp", "").replace("rp", "").strip()
+                    try:
+                        new_amount = Decimal(clean)
+                    except Exception:
+                        new_amount = Decimal(s)
 
         # Resolve account name → account_id jika ada
         new_account_id = None
-        new_account_name: str | None = args.get("new_account_name")
+        new_account_name: str | None = (
+            args.get("new_account_name")
+            or args.get("account_name")
+            or args.get("account")
+        )
         if new_account_name:
             acc = await self._svc.find_account_by_name(owner_jid, new_account_name)
             if not acc:
@@ -596,17 +690,48 @@ class FinanceToolExecutor:
         # Ambil transaksi lama untuk tahu jumlah aslinya
         orig_tx = await self._svc._repo.get_transaction_by_id(tx_id, owner_jid)
         if not orig_tx:
-            from whatsapp_platform.features.finance.service import TransactionNotFoundError
-            raise TransactionNotFoundError(f"Transaksi '{tx_id}' tidak ditemukan.")
+            # Fallback jika tx_id berupa keyword / deskripsi pencarian
+            matches = await self._svc.search_transactions(owner_jid, keyword=tx_id, limit=2)
+            if len(matches) == 1:
+                orig_tx = matches[0]
+                tx_id = orig_tx.id
+            elif len(matches) > 1:
+                return json.dumps({
+                    "status": "error",
+                    "error_code": "AMBIGUOUS_TRANSACTION",
+                    "message": (
+                        f"Ditemukan {len(matches)} transaksi dengan kata kunci '{tx_id}'. "
+                        f"Sebutkan ID transaksi yang ingin diubah (contoh: {matches[0].human_tx_id})."
+                    ),
+                }, ensure_ascii=False)
+            else:
+                from whatsapp_platform.features.finance.service import TransactionNotFoundError
+                raise TransactionNotFoundError(f"Transaksi '{tx_id}' tidak ditemukan.")
 
         effective_amount = new_amount if new_amount is not None else orig_tx.amount
+
+        new_description = (
+            args.get("new_description")
+            if args.get("new_description") is not None
+            else args.get("description")
+        )
+        if new_description is None:
+            new_description = args.get("desc")
+
+        new_category_name = (
+            args.get("new_category_name")
+            if args.get("new_category_name") is not None
+            else args.get("category_name")
+        )
+        if new_category_name is None:
+            new_category_name = args.get("category")
 
         corrected = await self._svc.correct_transaction(
             owner_jid=owner_jid,
             original_tx_id=tx_id,
             new_amount=effective_amount,
-            new_description=args.get("new_description"),
-            new_category_name=args.get("new_category_name"),
+            new_description=new_description,
+            new_category_name=new_category_name,
             new_account_id=new_account_id,
         )
 
@@ -615,11 +740,16 @@ class FinanceToolExecutor:
             "message": (
                 f"Transaksi {orig_tx.human_tx_id or tx_id} berhasil diperbarui."
             ),
+            "transaction_id": corrected.human_tx_id or corrected.id,
             "new_transaction_id": corrected.human_tx_id or corrected.id,
             "new_amount": float(corrected.amount),
+            "amount": float(corrected.amount),
             "new_description": corrected.description,
+            "description": corrected.description,
             "new_category": corrected.category_name,
+            "category": corrected.category_name,
             "new_account": corrected.account_name,
+            "account": corrected.account_name,
         }, ensure_ascii=False)
 
     async def _delete_transaction(self, owner_jid: str, args: dict) -> str:
@@ -627,12 +757,32 @@ class FinanceToolExecutor:
             TransactionNotFoundError,
         )
 
-        tx_id: str = args["transaction_id"]
+        tx_id: str = args.get("transaction_id") or args.get("tx_id") or args.get("id", "")
+        if not tx_id:
+            return json.dumps({
+                "status": "error",
+                "error_code": "INVALID_ARGUMENT",
+                "message": "Parameter transaction_id wajib diisi.",
+            }, ensure_ascii=False)
 
         # Ambil detail dulu untuk pesan konfirmasi
         orig_tx = await self._svc._repo.get_transaction_by_id(tx_id, owner_jid)
         if not orig_tx:
-            raise TransactionNotFoundError(f"Transaksi '{tx_id}' tidak ditemukan.")
+            matches = await self._svc.search_transactions(owner_jid, keyword=tx_id, limit=2)
+            if len(matches) == 1:
+                orig_tx = matches[0]
+                tx_id = orig_tx.id
+            elif len(matches) > 1:
+                return json.dumps({
+                    "status": "error",
+                    "error_code": "AMBIGUOUS_TRANSACTION",
+                    "message": (
+                        f"Ditemukan {len(matches)} transaksi dengan kata kunci '{tx_id}'. "
+                        f"Sebutkan ID transaksi yang ingin dihapus (contoh: {matches[0].human_tx_id})."
+                    ),
+                }, ensure_ascii=False)
+            else:
+                raise TransactionNotFoundError(f"Transaksi '{tx_id}' tidak ditemukan.")
 
         success = await self._svc.delete_transaction(owner_jid, tx_id)
         if success:

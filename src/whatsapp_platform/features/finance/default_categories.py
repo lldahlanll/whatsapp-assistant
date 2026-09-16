@@ -84,6 +84,13 @@ EXPENSE_KEYWORD_MAP: dict[str, str] = {
     "sumbangan": "Sosial",
     "donasi": "Sosial",
     "hadiah": "Sosial",
+    "bantuan": "Sosial",
+    "orang tua": "Sosial",
+    "ortu": "Sosial",
+    "keluarga": "Sosial",
+    "sedekah": "Sosial",
+    "infaq": "Sosial",
+    "zakat": "Sosial",
 }
 
 INCOME_KEYWORD_MAP: dict[str, str] = {

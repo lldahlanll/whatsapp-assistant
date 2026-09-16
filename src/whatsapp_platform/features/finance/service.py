@@ -89,12 +89,7 @@ class FinanceService:
     # ── Setup ─────────────────────────────────────────────────────────────────
 
     async def ensure_defaults(self, owner_jid: str) -> None:
-        """Create default categories and a Cash account if user has none yet."""
-        accounts = await self._repo.get_accounts(owner_jid)
-        if not accounts:
-            await self.create_account(owner_jid, "Kas", AccountType.CASH, Decimal("0"))
-            logger.info("Created default Cash account", owner=owner_jid)
-
+        """Create default categories if user has none yet."""
         categories = await self._repo.get_categories(owner_jid)
         if not categories:
             for cat in ALL_DEFAULT_CATEGORIES:
@@ -151,11 +146,21 @@ class FinanceService:
     async def get_total_balance(self, owner_jid: str) -> dict:
         accounts = await self.get_accounts(owner_jid)
         total = sum(a.balance for a in accounts)
+        available_balance = sum(a.balance for a in accounts if a.is_available_balance)
+        investment_balance = sum(a.balance for a in accounts if a.is_investment)
         return {
             "total": total,
+            "available_balance": available_balance,
+            "investment_balance": investment_balance,
             "currency": "IDR",
             "accounts": [
-                {"id": a.id, "name": a.name, "balance": a.balance, "type": a.account_type.value}
+                {
+                    "id": a.id,
+                    "name": a.name,
+                    "balance": a.balance,
+                    "type": a.account_type.value,
+                    "classification": a.classification,
+                }
                 for a in accounts
             ],
         }
@@ -170,10 +175,18 @@ class FinanceService:
             return acc
 
         accounts = await self.get_accounts(owner_jid)
+        if not accounts:
+            raise AccountNotFoundError(
+                "Belum ada rekening/dompet terdaftar. Silakan buat rekening terlebih dahulu "
+                "(contoh: 'buat rekening BCA saldo awal 1jt' atau '!finance rekening baru BCA bank 1jt')."
+            )
         if len(accounts) == 1:
             return accounts[0]
 
-        raise AccountRequiredError("Rekening/dompet belum ditentukan.")
+        acc_names = ", ".join(f"'{a.name}'" for a in accounts)
+        raise AccountRequiredError(
+            f"Rekening/dompet belum ditentukan. Silakan sebutkan rekening yang digunakan ({acc_names})."
+        )
 
     async def find_account_by_name(
         self, owner_jid: str, name: str
@@ -181,7 +194,11 @@ class FinanceService:
         accounts = await self.get_accounts(owner_jid)
         name_lower = name.lower()
         for acc in accounts:
-            if acc.name.lower() == name_lower or name_lower in acc.name.lower():
+            if (
+                acc.name.lower() == name_lower
+                or name_lower in acc.name.lower()
+                or acc.name.lower() in name_lower
+            ):
                 return acc
         return None
 
@@ -277,6 +294,11 @@ class FinanceService:
 
         new_balance = account.balance + amount
         saved_tx = await self._repo.save_transaction_atomic(tx, {account.id: new_balance})
+        if saved_tx.account_name is None:
+            saved_tx.account_name = account.name
+        if saved_tx.category_name is None and category:
+            saved_tx.category_name = category.name
+            saved_tx.category_icon = category.icon
         logger.info("Income added atomically", owner=owner_jid, amount=str(amount), account=account.name)
         return saved_tx
 
@@ -336,6 +358,11 @@ class FinanceService:
 
         new_balance = account.balance - amount
         saved_tx = await self._repo.save_transaction_atomic(tx, {account.id: new_balance})
+        if saved_tx.account_name is None:
+            saved_tx.account_name = account.name
+        if saved_tx.category_name is None and category:
+            saved_tx.category_name = category.name
+            saved_tx.category_icon = category.icon
         logger.info("Expense added atomically", owner=owner_jid, amount=str(amount), account=account.name)
         return saved_tx
 
@@ -400,6 +427,10 @@ class FinanceService:
             to_acc.id: to_acc.balance + amount,
         }
         saved_tx = await self._repo.save_transaction_atomic(tx, balance_updates)
+        if saved_tx.account_name is None:
+            saved_tx.account_name = from_acc.name
+        if saved_tx.transfer_to_account_name is None:
+            saved_tx.transfer_to_account_name = to_acc.name
         logger.info(
             "Transfer recorded atomically",
             owner=owner_jid,
@@ -486,43 +517,171 @@ class FinanceService:
         new_account_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> FinanceTransaction:
+        if new_amount <= 0:
+            raise InvalidAmountError("Jumlah transaksi harus lebih dari 0.")
+
         orig_tx = await self._repo.get_transaction_by_id(original_tx_id, owner_jid)
         if not orig_tx:
             raise TransactionNotFoundError(f"Transaksi '{original_tx_id}' tidak ditemukan.")
+        if orig_tx.is_reversed:
+            raise TransactionAlreadyReversedError(
+                f"Transaksi '{orig_tx.human_tx_id or orig_tx.id}' sudah di-reverse dan tidak dapat diubah."
+            )
 
-        await self.reverse_transaction(
-            owner_jid=owner_jid,
-            tx_id_or_human_id=original_tx_id,
-            reason=f"Koreksi transaksi {orig_tx.human_tx_id or orig_tx.id}",
+        # 1. Resolve Account
+        target_account_id = new_account_id or orig_tx.account_id
+        target_acc = await self._repo.get_account_by_id(target_account_id, owner_jid)
+        if not target_acc:
+            raise AccountNotFoundError("Rekening transaksi tidak ditemukan.")
+
+        orig_acc = (
+            target_acc
+            if target_account_id == orig_tx.account_id
+            else await self._repo.get_account_by_id(orig_tx.account_id, owner_jid)
+        )
+        if not orig_acc:
+            raise AccountNotFoundError("Rekening transaksi asal tidak ditemukan.")
+
+        # 2. Resolve Category
+        target_category_id = orig_tx.category_id
+        target_category_name = orig_tx.category_name
+        target_category_icon = orig_tx.category_icon
+
+        if new_category_name:
+            cat = await self._resolve_category(owner_jid, new_category_name, orig_tx.transaction_type)
+            if cat:
+                target_category_id = cat.id
+                target_category_name = cat.name
+                target_category_icon = cat.icon
+        elif new_description and not target_category_id:
+            cat = await self._auto_category(owner_jid, new_description, orig_tx.transaction_type)
+            if cat:
+                target_category_id = cat.id
+                target_category_name = cat.name
+                target_category_icon = cat.icon
+
+        # 3. Calculate Balance Updates
+        balance_updates: dict[str, Decimal] = {}
+        old_amount = orig_tx.amount
+
+        if orig_tx.transaction_type == TransactionType.EXPENSE:
+            if target_account_id == orig_tx.account_id:
+                # Same account: delta = old_amount - new_amount
+                # New balance = current_balance + old_amount - new_amount
+                adj = old_amount - new_amount
+                new_bal = orig_acc.balance + adj
+                if new_bal < 0:
+                    shortfall = abs(new_bal)
+                    raise InsufficientBalanceError(
+                        f"Saldo {orig_acc.name} tidak mencukupi untuk update nominal. Kurang Rp {shortfall:,.0f}."
+                    )
+                balance_updates[orig_acc.id] = new_bal
+            else:
+                # Different accounts:
+                balance_updates[orig_acc.id] = orig_acc.balance + old_amount
+                if target_acc.balance < new_amount:
+                    shortfall = new_amount - target_acc.balance
+                    raise InsufficientBalanceError(
+                        f"Saldo {target_acc.name} Rp {target_acc.balance:,.0f}, sedangkan transaksi Rp {new_amount:,.0f}. Kurang Rp {shortfall:,.0f}."
+                    )
+                balance_updates[target_acc.id] = target_acc.balance - new_amount
+
+        elif orig_tx.transaction_type == TransactionType.INCOME:
+            if target_account_id == orig_tx.account_id:
+                new_bal = orig_acc.balance - old_amount + new_amount
+                if new_bal < 0:
+                    shortfall = abs(new_bal)
+                    raise InsufficientBalanceError(
+                        f"Saldo {orig_acc.name} tidak mencukupi untuk penyesuaian pemasukan. Kurang Rp {shortfall:,.0f}."
+                    )
+                balance_updates[orig_acc.id] = new_bal
+            else:
+                new_orig_bal = orig_acc.balance - old_amount
+                if new_orig_bal < 0:
+                    shortfall = abs(new_orig_bal)
+                    raise InsufficientBalanceError(
+                        f"Saldo {orig_acc.name} tidak mencukupi untuk memindahkan pemasukan. Kurang Rp {shortfall:,.0f}."
+                    )
+                balance_updates[orig_acc.id] = new_orig_bal
+                balance_updates[target_acc.id] = target_acc.balance + new_amount
+
+        elif orig_tx.transaction_type == TransactionType.TRANSFER:
+            to_acc_id = orig_tx.transfer_to_account_id
+            if not to_acc_id:
+                raise FinanceServiceError("Transaksi transfer tidak memiliki rekening tujuan.")
+            to_acc = await self._repo.get_account_by_id(to_acc_id, owner_jid)
+            if not to_acc:
+                raise AccountNotFoundError("Rekening tujuan transfer tidak ditemukan.")
+
+            if target_account_id == orig_tx.account_id:
+                from_bal = orig_acc.balance + old_amount - new_amount
+                if from_bal < 0:
+                    shortfall = abs(from_bal)
+                    raise InsufficientBalanceError(
+                        f"Saldo {orig_acc.name} tidak mencukupi untuk update transfer. Kurang Rp {shortfall:,.0f}."
+                    )
+                to_bal = to_acc.balance - old_amount + new_amount
+                if to_bal < 0:
+                    shortfall = abs(to_bal)
+                    raise InsufficientBalanceError(
+                        f"Saldo {to_acc.name} tidak mencukupi untuk penyesuaian transfer. Kurang Rp {shortfall:,.0f}."
+                    )
+                balance_updates[orig_acc.id] = from_bal
+                balance_updates[to_acc.id] = to_bal
+            else:
+                from_orig_bal = orig_acc.balance + old_amount
+                to_bal = to_acc.balance - old_amount + new_amount
+                if to_bal < 0:
+                    shortfall = abs(to_bal)
+                    raise InsufficientBalanceError(
+                        f"Saldo {to_acc.name} tidak mencukupi untuk penyesuaian transfer. Kurang Rp {shortfall:,.0f}."
+                    )
+                if target_acc.balance < new_amount:
+                    shortfall = new_amount - target_acc.balance
+                    raise InsufficientBalanceError(
+                        f"Saldo {target_acc.name} tidak mencukupi untuk transfer. Kurang Rp {shortfall:,.0f}."
+                    )
+                balance_updates[orig_acc.id] = from_orig_bal
+                balance_updates[target_acc.id] = target_acc.balance - new_amount
+                balance_updates[to_acc.id] = to_bal
+
+        # 4. Construct updated FinanceTransaction
+        updated_tx = FinanceTransaction(
+            id=orig_tx.id,
+            human_tx_id=orig_tx.human_tx_id,
+            idempotency_key=idempotency_key or orig_tx.idempotency_key,
+            owner_jid=orig_tx.owner_jid,
+            account_id=target_acc.id,
+            transaction_type=orig_tx.transaction_type,
+            amount=new_amount,
+            category_id=target_category_id,
+            description=new_description if new_description is not None else orig_tx.description,
+            transaction_date=orig_tx.transaction_date,
+            transfer_to_account_id=orig_tx.transfer_to_account_id,
+            is_reversed=False,
+            reversal_of_id=orig_tx.reversal_of_id,
+            created_at=orig_tx.created_at,
+            account_name=target_acc.name,
+            category_name=target_category_name,
+            category_icon=target_category_icon,
+            transfer_to_account_name=orig_tx.transfer_to_account_name,
         )
 
-        if orig_tx.transaction_type == TransactionType.INCOME:
-            return await self.add_income(
-                owner_jid=owner_jid,
-                amount=new_amount,
-                description=new_description or orig_tx.description,
-                category_name=new_category_name or orig_tx.category_name,
-                account_id=new_account_id or orig_tx.account_id,
-                idempotency_key=idempotency_key,
-            )
-        elif orig_tx.transaction_type == TransactionType.EXPENSE:
-            return await self.add_expense(
-                owner_jid=owner_jid,
-                amount=new_amount,
-                description=new_description or orig_tx.description,
-                category_name=new_category_name or orig_tx.category_name,
-                account_id=new_account_id or orig_tx.account_id,
-                idempotency_key=idempotency_key,
-            )
-        else:
-            return await self.transfer(
-                owner_jid=owner_jid,
-                amount=new_amount,
-                from_account_id=new_account_id or orig_tx.account_id,
-                to_account_id=orig_tx.transfer_to_account_id or "",
-                description=new_description or orig_tx.description,
-                idempotency_key=idempotency_key,
-            )
+        saved = await self._repo.update_transaction_atomic(
+            transaction=updated_tx,
+            balance_updates=balance_updates,
+        )
+        logger.info(
+            "Transaction updated atomically",
+            owner=owner_jid,
+            tx_id=orig_tx.id,
+            old_amount=str(old_amount),
+            new_amount=str(new_amount),
+        )
+        return saved
+
+    # Alias update_transaction -> correct_transaction
+    update_transaction = correct_transaction
 
     # ── Reports ───────────────────────────────────────────────────────────────
 

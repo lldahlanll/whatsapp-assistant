@@ -107,12 +107,40 @@ class AIReplyUseCase:
             logger.warning("Intent classification failed, falling back to 'chat'", error=str(exc))
             intent = "chat"
 
+        # Dukung konfirmasi pendek (misal 'ya', 'oke', 'lanjut', 'hapus') setelah prompt konfirmasi
+        if tools_available and intent == "chat" and trigger_text:
+            clean_trigger = trigger_text.strip().lower()
+            confirmation_words = {
+                "ya", "iya", "y", "yes", "oke", "ok", "lanjut", "lanjutkan",
+                "yakin", "benar", "betul", "setuju", "hapus", "batal", "batalkan",
+                "tidak", "gak", "nggak", "no", "deal", "siap", "gas"
+            }
+            if clean_trigger in confirmation_words or len(clean_trigger.split()) <= 2:
+                try:
+                    recent = await self._get_conv_uc.execute(chat_jid_str, limit=2)
+                    for prev_msg in recent:
+                        if prev_msg.direction == MessageDirection.OUTBOUND or prev_msg.is_from_me:
+                            prev_txt = prev_msg.content.text if isinstance(prev_msg.content, TextContent) else ""
+                            prev_low = prev_txt.lower()
+                            if any(k in prev_low for k in ("konfirmasi", "yakin", "rekening", "transaksi", "saldo", "budget", "anggaran", "hapus")):
+                                intent = "finance"
+                                logger.info("Inherited 'finance' intent from previous confirmation prompt", chat=chat_jid_str)
+                                break
+                            elif any(k in prev_low for k in ("mikrotik", "router", "interface", "reboot", "restart")):
+                                intent = "network"
+                                logger.info("Inherited 'network' intent from previous confirmation prompt", chat=chat_jid_str)
+                                break
+                except Exception as exc:
+                    logger.debug("Failed to check confirmation context", error=str(exc))
+
         # 2. Resolve ContextPolicy (system prompt, dynamic tools, history limit)
+        is_group = trigger_message.chat_jid.is_group
         policy = ContextPolicyManager.get_policy(
             intent=intent,
             text=trigger_text,
             settings=self._settings,
             tools_enabled=tools_available,
+            is_group=is_group,
         )
 
         # 3. Fetch DB conversation history using policy.history_limit (with fallback guard)
