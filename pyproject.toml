@@ -7,7 +7,7 @@ name = "whatsapp-platform"
 version = "0.1.0"
 description = "Enterprise-grade Clean Architecture WhatsApp Automation Platform built on Neonize 0.4.3.post0"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [
     { name = "Software Architect & Engineering Team" }
@@ -50,7 +50,7 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 
 [tool.ruff]
-target-version = "py311"
+target-version = "py312"
 line-length = 120
 
 [tool.ruff.lint]
