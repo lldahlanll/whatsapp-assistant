@@ -14,7 +14,11 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from whatsapp_platform.infrastructure.ai.compact_formatter import compact_tool_result
-from whatsapp_platform.infrastructure.ai.constants import DEFAULT_MODELS
+from whatsapp_platform.infrastructure.ai.constants import (
+    DEFAULT_MODELS,
+    NINEROUTER_INTENT_MODEL_MAP,
+    SUPPORTED_MODELS,
+)
 from whatsapp_platform.infrastructure.ai.finance_fast_path import try_finance_mutation_fast_path
 from whatsapp_platform.infrastructure.ai.interfaces import (
     AIResponse,
@@ -80,6 +84,7 @@ class AIService:
         providers: dict[str, tuple[ILLMProvider, KeyPool]],
         strategy: IProviderStrategy,
         default_models: dict[str, str] | None = None,
+        intent_models: dict[str, dict[str, str]] | None = None,
         db_store: AISQLiteStore | None = None,
         max_context_messages: int = 20,
     ) -> None:
@@ -88,12 +93,16 @@ class AIService:
             providers: {provider_name: (adapter, key_pool)}
             strategy:  Provider ordering strategy (e.g. FixedPriorityStrategy)
             default_models: {provider_name: default_model_name}
+            intent_models: {provider_name: {intent: model_name}} — per-intent model routing
             db_store:  Optional SQLite store for persisting context history
             max_context_messages: Max messages per chat kept in context before trimming
         """
         self._providers = providers
         self._strategy = strategy
         self._default_models: dict[str, str] = default_models or DEFAULT_MODELS
+        self._intent_models: dict[str, dict[str, str]] = (
+            intent_models if intent_models is not None else {"ninerouter": dict(NINEROUTER_INTENT_MODEL_MAP)}
+        )
         self._circuit_breaker = _ProviderCircuitBreaker()
         self.usage_counter = DailyUsageCounter()
         self._db_store = db_store
@@ -182,6 +191,13 @@ class AIService:
         }
         ordered = self._strategy.ordered_providers(available)
 
+        # Override model hanya berlaku untuk provider pemilik model tsb; provider itu dicoba lebih dulu.
+        override_owners = self._override_owners(model_override)
+        if override_owners:
+            ordered = [p for p in ordered if p in override_owners] + [
+                p for p in ordered if p not in override_owners
+            ]
+
         if not ordered:
             raise AllProvidersExhaustedError(
                 "All providers are in cooldown — no provider available"
@@ -203,9 +219,7 @@ class AIService:
 
         for provider_name in ordered:
             adapter, pool = self._providers[provider_name]
-            model = model_override or self._default_models.get(
-                provider_name, DEFAULT_MODELS.get(provider_name, "")
-            )
+            model = self._resolve_model(provider_name, intent, model_override, override_owners)
 
             for _attempt in range(pool.size()):
                 key_info = await pool.next_available_key()
@@ -287,6 +301,29 @@ class AIService:
         raise AllProvidersExhaustedError(
             f"All providers exhausted. Last error: {last_error}"
         )
+
+    @staticmethod
+    def _override_owners(model_override: str | None) -> set[str]:
+        """Provider yang mendaftarkan model override di SUPPORTED_MODELS (kosong jika tidak dikenal)."""
+        if not model_override:
+            return set()
+        return {name for name, models in SUPPORTED_MODELS.items() if model_override in models}
+
+    def _resolve_model(
+        self,
+        provider_name: str,
+        intent: str,
+        model_override: str | None,
+        override_owners: set[str],
+    ) -> str:
+        """Pilih model: override (jika milik provider ini) → peta per-intent → default provider."""
+        # Override yang tidak terdaftar di whitelist mana pun tetap diteruskan apa adanya.
+        if model_override and (provider_name in override_owners or not override_owners):
+            return model_override
+        intent_model = self._intent_models.get(provider_name, {}).get(intent)
+        if intent_model:
+            return intent_model
+        return self._default_models.get(provider_name, DEFAULT_MODELS.get(provider_name, ""))
 
     async def generate_reply(
         self,

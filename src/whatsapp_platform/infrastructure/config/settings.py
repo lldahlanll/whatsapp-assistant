@@ -56,6 +56,28 @@ class Settings(BaseSettings):
         default_factory=list, description="OpenRouter API key list (comma-separated)"
     )
 
+    # 9router settings
+    ninerouter_api_keys: list[str] | str = Field(
+        default_factory=list,
+        description="9router API key list (comma-separated)",
+    )
+    ninerouter_base_url: str = Field(
+        default="",
+        description="9router base URL, e.g. http://localhost:4000/v1",
+    )
+    ninerouter_model_chat: str = Field(
+        default="chat-pool",
+        description="Virtual model name for chat intent in 9router",
+    )
+    ninerouter_model_tools: str = Field(
+        default="tools-pool",
+        description="Virtual model name for finance/network tool calling intent in 9router",
+    )
+    ninerouter_model_vision: str = Field(
+        default="vision-pool",
+        description="Virtual model name for image/vision intent in 9router",
+    )
+
     ai_cooldown_default_seconds: float = Field(
         default=60.0, description="Default key cooldown when Retry-After is absent"
     )
@@ -94,6 +116,13 @@ class Settings(BaseSettings):
     )
     ai_http_timeout_seconds: float = Field(
         default=30.0, description="HTTP timeout for AI provider client"
+    )
+    ai_vision_enabled: bool = Field(
+        default=True, description="Analisis gambar (vision) untuk pesan gambar yang memicu AI"
+    )
+    ai_image_max_bytes: int = Field(
+        default=5 * 1024 * 1024,
+        description="Ukuran maksimum gambar (byte) yang diunduh dan dikirim ke model vision",
     )
     ai_database_path: str = Field(
         default="./storage/ai_data.db", description="Path to AI persistence SQLite database"
@@ -134,6 +163,7 @@ class Settings(BaseSettings):
         "gemini_api_keys",
         "groq_api_keys",
         "openrouter_api_keys",
+        "ninerouter_api_keys",
         "customer_lookup_allowed_groups",
         "network_allowed_jids",
         mode="before",

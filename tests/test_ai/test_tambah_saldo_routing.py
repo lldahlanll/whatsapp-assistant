@@ -78,3 +78,38 @@ def test_select_tools_update_and_history() -> None:
     history_names = [t.name for t in history_tools]
     assert "finance_get_transactions" in history_names
 
+
+def test_classify_intent_pindah_saldo_and_transfer() -> None:
+    """Pastikan query pindah saldo, pindahkan, dan tf terdeteksi sebagai finance."""
+    assert classify_intent("pindah saldo 50rb dari BCA ke Mandiri") == "finance"
+    assert classify_intent("pindah 100rb dari BCA ke GoPay") == "finance"
+    assert classify_intent("pindahkan saldo dari kas ke bca") == "finance"
+    assert classify_intent("tf 50rb ke gopay") == "finance"
+    assert classify_intent("oper saldo 200rb ke tabungan") == "finance"
+
+
+def test_select_tools_pindah_saldo_includes_transfer() -> None:
+    """Pastikan query pindah saldo dan variasinya menyertakan tool finance_transfer."""
+    transfer_queries = [
+        "pindah saldo 50rb dari BCA ke Mandiri",
+        "pindah saldo dari rekening a ke b",
+        "pindahkan uang 100rb dari bca ke gopay",
+        "tf 50rb dari kas ke bca",
+        "oper saldo 20rb ke gopay",
+    ]
+    for q in transfer_queries:
+        tools = select_tools("finance", q) or []
+        tool_names = [t.name for t in tools]
+        assert "finance_transfer" in tool_names, (
+            f"finance_transfer harus ada untuk query '{q}', didapat: {tool_names}"
+        )
+
+
+def test_transfer_verbs_do_not_match_inside_other_words() -> None:
+    """'oper'/'pindah' tidak boleh terdeteksi dari kata seperti 'operator' atau 'properti'."""
+    assert classify_intent("cek operator internet") == "network"
+    assert classify_intent("bandwidth properti kantor") == "network"
+    assert classify_intent("pindah channel wifi") == "network"
+    lower = "laporan operasional bulan ini"
+    tools = select_tools("finance", lower) or []
+    assert "finance_transfer" not in [t.name for t in tools]

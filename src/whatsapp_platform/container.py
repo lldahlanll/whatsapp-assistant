@@ -33,6 +33,7 @@ from whatsapp_platform.infrastructure.config.settings import Settings
 from whatsapp_platform.infrastructure.database.base import (
     create_engine_and_session_factory,
 )
+from whatsapp_platform.infrastructure.database.migration_backup import backup_before_migration
 from whatsapp_platform.infrastructure.database.repositories.contact_repo import (
     SQLAlchemyContactRepository,
 )
@@ -105,12 +106,17 @@ class Container(IContainer):
         from whatsapp_platform.features.ai.config_store import AIChatConfigStore
         from whatsapp_platform.features.ai.rate_guard import PerChatRateGuard
         from whatsapp_platform.infrastructure.ai.ai_service import AIService
-        from whatsapp_platform.infrastructure.ai.constants import DEFAULT_PROVIDER_ORDER
+        from whatsapp_platform.infrastructure.ai.constants import (
+            DEFAULT_MODELS,
+            DEFAULT_PROVIDER_ORDER,
+            NINEROUTER_INTENT_MODEL_MAP,
+        )
         from whatsapp_platform.infrastructure.ai.interfaces import ILLMProvider
         from whatsapp_platform.infrastructure.ai.key_pool import KeyPool
         from whatsapp_platform.infrastructure.ai.provider_strategy import FixedPriorityStrategy
         from whatsapp_platform.infrastructure.ai.providers.gemini import GeminiProvider
         from whatsapp_platform.infrastructure.ai.providers.groq import GroqProvider
+        from whatsapp_platform.infrastructure.ai.providers.ninerouter import NineRouterProvider
         from whatsapp_platform.infrastructure.ai.providers.openrouter import OpenRouterProvider
 
         self._http_client = httpx.AsyncClient(
@@ -152,10 +158,39 @@ class Container(IContainer):
             )
             providers_map["openrouter"] = (openrouter_adapter, openrouter_pool)
 
+        if self.settings.ninerouter_api_keys and self.settings.ninerouter_base_url:
+            ninerouter_adapter = NineRouterProvider(
+                client=self._http_client,
+                base_url=self.settings.ninerouter_base_url,
+                cooldown_default=self.settings.ai_cooldown_default_seconds,
+            )
+            ninerouter_pool = KeyPool(
+                cast(list[str], self.settings.ninerouter_api_keys),
+                default_cooldown_seconds=self.settings.ai_cooldown_default_seconds,
+            )
+            providers_map["ninerouter"] = (ninerouter_adapter, ninerouter_pool)
+
+        chat_model = self.settings.ninerouter_model_chat or NINEROUTER_INTENT_MODEL_MAP["chat"]
+        tools_model = self.settings.ninerouter_model_tools or NINEROUTER_INTENT_MODEL_MAP["finance"]
+        vision_model = self.settings.ninerouter_model_vision or NINEROUTER_INTENT_MODEL_MAP["image"]
+        default_models = {**DEFAULT_MODELS, "ninerouter": chat_model}
+        intent_models = {
+            "ninerouter": {
+                "simple_chat": chat_model,
+                "chat": chat_model,
+                "finance": tools_model,
+                "network": tools_model,
+                "full": tools_model,
+                "image": vision_model,
+            }
+        }
+
         strategy = FixedPriorityStrategy(DEFAULT_PROVIDER_ORDER)
         ai_service = AIService(
             providers=providers_map,
             strategy=strategy,
+            default_models=default_models,
+            intent_models=intent_models,
             db_store=ai_sqlite_store,
             max_context_messages=self.settings.ai_context_window_messages,
         )
@@ -265,7 +300,7 @@ class Container(IContainer):
 
         try:
             await close_pool()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("Error closing MySQL pool during teardown", error=str(exc))
 
         if MikroTikRestClient in self._services:
@@ -300,6 +335,17 @@ class Container(IContainer):
         This ensures the database schema is always up-to-date on startup.
         """
         project_root = Path(__file__).resolve().parents[2]
+
+        # Backup DB dulu jika ada migrasi tertunda; gagal backup = jangan migrasi.
+        try:
+            backup_path = await asyncio.to_thread(
+                backup_before_migration, self.settings.database_url, project_root
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Database backup before migration failed: {exc}") from exc
+        if backup_path:
+            logger.info("Database backed up before migration", backup=str(backup_path))
+
         logger.info("Running Alembic migrations...", cwd=str(project_root))
         try:
             proc = await asyncio.create_subprocess_exec(

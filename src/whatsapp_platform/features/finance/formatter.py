@@ -277,7 +277,3 @@ def format_budget_list(
 
 def format_finance_error(exc: Exception) -> str:
     return str(exc)
-
-
-def _account_icon(account_type: str) -> str:
-    return ""

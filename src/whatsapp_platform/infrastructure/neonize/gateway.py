@@ -358,8 +358,12 @@ class NeonizeGateway(IMessagingGateway):
 
     async def download_media(self, raw_message: Any) -> bytes:
         """Download media attachment from a MessageEv or Protobuf message object."""
+        # download_any butuh protobuf Message (ev.Message), bukan MessageEv pembungkusnya.
+        message = getattr(raw_message, "Message", None) or raw_message
         try:
-            data = await asyncio.to_thread(self.client.download_any, raw_message)
+            data = await asyncio.to_thread(self.client.download_any, message)
+            if data is None:
+                raise GatewayException("Media content is not available")
             if isinstance(data, bytes):
                 return data
             elif isinstance(data, bytearray):

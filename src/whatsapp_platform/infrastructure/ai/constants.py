@@ -22,6 +22,11 @@ SUPPORTED_MODELS: dict[str, list[str]] = {
         "meta-llama/llama-3.3-70b-instruct:free",
         "poolside/laguna-xs-2.1:free"
     ],
+    "ninerouter": [
+        "chat-pool",
+        "tools-pool",
+        "vision-pool",
+    ],
 }
 
 ALL_SUPPORTED_MODELS: set[str] = {m for models in SUPPORTED_MODELS.values() for m in models}
@@ -30,11 +35,21 @@ DEFAULT_MODELS: dict[str, str] = {
     "gemini": "gemini-3.5-flash-lite",
     "groq": "openai/gpt-oss-20b",
     "openrouter": "openai/gpt-oss-20b:free",
+    "ninerouter": "chat-pool",
 }
 
-DEFAULT_PROVIDER_ORDER: list[str] = ["gemini","groq", "openrouter"]
+DEFAULT_PROVIDER_ORDER: list[str] = ["ninerouter", "gemini", "groq", "openrouter"]
 
-IntentType = Literal["simple_chat", "chat", "finance", "network", "full"]
+NINEROUTER_INTENT_MODEL_MAP: dict[str, str] = {
+    "simple_chat": "chat-pool",
+    "chat": "chat-pool",
+    "finance": "tools-pool",
+    "network": "tools-pool",
+    "full": "tools-pool",
+    "image": "vision-pool",
+}
+
+IntentType = Literal["simple_chat", "chat", "finance", "network", "full", "image"]
 
 BASE_SYSTEM_PROMPT = (
     "You are Nara, a smart, friendly, and helpful personal assistant on WhatsApp.\n"
@@ -141,6 +156,27 @@ AI_FALLBACK_ERROR_MESSAGE = (
     "Silakan coba lagi nanti."
 )
 
+# Vision / analisis gambar
+AI_IMAGE_SUPPORTED_MIME_TYPES: frozenset[str] = frozenset(
+    {"image/jpeg", "image/png", "image/webp"}
+)
+AI_IMAGE_DEFAULT_MIME_TYPE = "image/jpeg"
+AI_IMAGE_DEFAULT_PROMPT = "Tolong jelaskan isi gambar ini."
+
+AI_IMAGE_TOO_LARGE_MESSAGE = (
+    "Maaf, gambar terlalu besar untuk dianalisis (maksimal {max_mb} MB). "
+    "Silakan kirim gambar yang lebih kecil."
+)
+
+AI_IMAGE_UNSUPPORTED_MESSAGE = (
+    "Maaf, format gambar ini belum didukung. Gunakan JPEG, PNG, atau WebP."
+)
+
+AI_IMAGE_DOWNLOAD_FAILED_MESSAGE = (
+    "Maaf, gambar gagal diunduh sehingga tidak bisa dianalisis. "
+    "Silakan kirim ulang gambarnya."
+)
+
 _AMOUNT_PATTERN = re.compile(
     r"(?:rp\.?\s*\d+|\b\d+\s*(?:rb|ribu|jt|juta|k)\b)",
     re.IGNORECASE,
@@ -148,6 +184,10 @@ _AMOUNT_PATTERN = re.compile(
 _FINANCE_ACTION_VERBS = {
     "ubah", "ganti", "koreksi", "revisi", "edit", "hapus", "batalkan", "batal", "jadi",
 }
+
+# Kata kerja pindah dana dicocokkan per kata utuh agar "operator"/"properti" tidak ikut terdeteksi.
+TRANSFER_VERB_PATTERN = re.compile(r"\b(?:tf|pindah(?:kan)?|oper)\b", re.IGNORECASE)
+_TRANSFER_SHORTCUT = re.compile(r"\btf\b", re.IGNORECASE)
 
 FINANCE_KEYWORDS: set[str] = {
     "bayar", "beli", "saldo", "transfer", "pengeluaran", "pemasukan", "budget",
@@ -178,9 +218,15 @@ def classify_intent(text: str) -> IntentType:
     has_network = any(kw in lower for kw in NETWORK_KEYWORDS)
 
     if not has_finance:
-        has_amount = bool(_AMOUNT_PATTERN.search(lower))
-        if has_amount and any(verb in lower for verb in _FINANCE_ACTION_VERBS):
+        if bool(_TRANSFER_SHORTCUT.search(lower)):
             has_finance = True
+        else:
+            has_amount = bool(_AMOUNT_PATTERN.search(lower))
+            has_verb = any(verb in lower for verb in _FINANCE_ACTION_VERBS) or bool(
+                TRANSFER_VERB_PATTERN.search(lower)
+            )
+            if has_amount and has_verb:
+                has_finance = True
 
     if has_finance and has_network:
         return "full"

@@ -26,8 +26,6 @@ from whatsapp_platform.features.finance.default_categories import (
 )
 from whatsapp_platform.features.finance.parser import (
     guess_category_from_text,
-    parse_amount_from_text,
-    parse_description_without_amount,
 )
 
 if TYPE_CHECKING:
@@ -49,10 +47,6 @@ class AccountRequiredError(FinanceServiceError):
 
 
 class InsufficientBalanceError(FinanceServiceError):
-    pass
-
-
-class DuplicateTransactionError(FinanceServiceError):
     pass
 
 
@@ -766,14 +760,6 @@ class FinanceService:
             end = datetime(y, m + 1, 1, tzinfo=UTC)
 
         return await self._repo.get_category_summary(owner_jid, start, end)
-
-    # ── Quick parser shorthand ────────────────────────────────────────────────
-
-    def parse_amount(self, text: str) -> Decimal | None:
-        return parse_amount_from_text(text)
-
-    def parse_description(self, text: str) -> str:
-        return parse_description_without_amount(text)
 
     # ── Budgets ───────────────────────────────────────────────────────────────
 

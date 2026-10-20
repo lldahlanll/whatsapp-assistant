@@ -28,6 +28,7 @@ from whatsapp_platform.infrastructure.ai.interfaces import (
     RateLimitError,
     ToolCall,
 )
+from whatsapp_platform.infrastructure.ai.providers.openai_format import build_openai_content
 
 if TYPE_CHECKING:
     from whatsapp_platform.infrastructure.mikrotik.tool_schema import ToolDefinition
@@ -84,7 +85,7 @@ def _build_groq_messages(messages: list[ProviderMessage]) -> list[dict[str, Any]
                 entry["content"] = m.content
             result.append(entry)
         else:
-            result.append({"role": m.role, "content": m.content})
+            result.append({"role": m.role, "content": build_openai_content(m)})
     return result
 
 

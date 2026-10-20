@@ -104,8 +104,18 @@ def _build_gemini_payload(
                     parts.append({"text": ""})
                 contents.append({"role": "model", "parts": parts})
         else:
-            # user role
-            contents.append({"role": "user", "parts": [{"text": msg.content}]})
+            # user role (gambar dikirim sebagai inline_data base64)
+            user_parts: list[dict[str, Any]] = []
+            if msg.content or not msg.images:
+                user_parts.append({"text": msg.content})
+            for image in msg.images or []:
+                user_parts.append({
+                    "inline_data": {
+                        "mime_type": image.mime_type,
+                        "data": image.base64_data,
+                    }
+                })
+            contents.append({"role": "user", "parts": user_parts})
 
     payload: dict[str, Any] = {"contents": contents}
     if system_parts:
