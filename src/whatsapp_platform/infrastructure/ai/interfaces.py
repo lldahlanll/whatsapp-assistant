@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
@@ -25,6 +26,22 @@ class ToolCall:
     raw_payload: Any = None
 
 
+@dataclass(frozen=True)
+class ImagePart:
+    """Gambar mentah yang dilampirkan ke pesan user (input vision/multimodal)."""
+
+    data: bytes
+    mime_type: str = "image/jpeg"
+
+    @property
+    def base64_data(self) -> str:
+        return base64.b64encode(self.data).decode("ascii")
+
+    def to_data_uri(self) -> str:
+        """Format data URI untuk API OpenAI-compatible (image_url)."""
+        return f"data:{self.mime_type};base64,{self.base64_data}"
+
+
 @dataclass
 class ProviderMessage:
     """Single message in the LLM conversation, using native API roles.
@@ -34,6 +51,9 @@ class ProviderMessage:
     - "user"      → inbound messages (human/group members)
     - "assistant" → previous bot replies
     - "tool"      → tool execution results returned to LLM
+
+    ``images`` hanya dipakai untuk role "user"; setiap adapter mengubahnya ke
+    format multimodal native provider masing-masing.
     """
 
     role: Literal["system", "user", "assistant", "tool"]
@@ -42,6 +62,7 @@ class ProviderMessage:
     name: str | None = None
     tool_calls: list[ToolCall] | None = None
     raw_parts: list[dict[str, Any]] | None = None
+    images: list[ImagePart] | None = None
 
 
 @dataclass

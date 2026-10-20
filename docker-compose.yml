@@ -1,5 +1,6 @@
 services:
   app:
+    image: whatsapp-platform:latest
     build:
       context: .
       dockerfile: Dockerfile

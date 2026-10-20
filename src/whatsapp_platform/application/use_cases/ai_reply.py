@@ -12,11 +12,24 @@ from whatsapp_platform.application.use_cases.get_conversation import (
     GetConversationHistoryUseCase,
 )
 from whatsapp_platform.domain.entities.message import Message, MessageDirection
-from whatsapp_platform.domain.value_objects.message_content import TextContent
+from whatsapp_platform.domain.value_objects.message_content import (
+    MediaContent,
+    MediaType,
+    TextContent,
+)
 from whatsapp_platform.infrastructure.ai.ai_service import AIService
-from whatsapp_platform.infrastructure.ai.constants import classify_intent
+from whatsapp_platform.infrastructure.ai.constants import (
+    AI_IMAGE_DEFAULT_MIME_TYPE,
+    AI_IMAGE_DEFAULT_PROMPT,
+    IntentType,
+    classify_intent,
+)
 from whatsapp_platform.infrastructure.ai.context_policy import ContextPolicyManager
-from whatsapp_platform.infrastructure.ai.interfaces import AIResponse, ProviderMessage
+from whatsapp_platform.infrastructure.ai.interfaces import (
+    AIResponse,
+    ImagePart,
+    ProviderMessage,
+)
 from whatsapp_platform.infrastructure.config.settings import Settings
 
 if TYPE_CHECKING:
@@ -56,6 +69,21 @@ def _escape_role_spoof(text: str) -> str:
     return _ROLE_SPOOF_PATTERN.sub(lambda m: m.group(0).rstrip(":") + ":\u200b", text)
 
 
+def _extract_image(msg: Message) -> ImagePart | None:
+    """Ambil gambar (bytes sudah diunduh handler) dari pesan pemicu, jika ada."""
+    content = msg.content
+    if (
+        isinstance(content, MediaContent)
+        and content.media_type == MediaType.IMAGE
+        and content.file_bytes
+    ):
+        return ImagePart(
+            data=content.file_bytes,
+            mime_type=content.mime_type or AI_IMAGE_DEFAULT_MIME_TYPE,
+        )
+    return None
+
+
 def _message_to_provider_role(msg: Message) -> ProviderMessage:
     text = msg.content.text if isinstance(msg.content, TextContent) else "[media]"
     text = _escape_role_spoof(text)
@@ -93,19 +121,26 @@ class AIReplyUseCase:
         model_override: str | None = None,
     ) -> AIResponse:
         """Generate an AI reply for the trigger message in the given chat."""
-        trigger_text = (
-            trigger_message.content.text
-            if isinstance(trigger_message.content, TextContent)
-            else ""
-        )
+        image = _extract_image(trigger_message)
+        if isinstance(trigger_message.content, TextContent):
+            trigger_text = trigger_message.content.text
+        elif isinstance(trigger_message.content, MediaContent):
+            trigger_text = trigger_message.content.caption or ""
+        else:
+            trigger_text = ""
 
         # 1. Intent classification BEFORE history fetch (with fallback guard)
         tools_available = bool(self._tool_executor and self._tool_executor.is_enabled)
-        try:
-            intent = classify_intent(trigger_text) if tools_available else "chat"
-        except Exception as exc:
-            logger.warning("Intent classification failed, falling back to 'chat'", error=str(exc))
-            intent = "chat"
+        intent: IntentType
+        if image is not None:
+            # Gambar selalu ke intent "image" → 9router memakai model vision
+            intent = "image"
+        else:
+            try:
+                intent = classify_intent(trigger_text) if tools_available else "chat"
+            except Exception as exc:
+                logger.warning("Intent classification failed, falling back to 'chat'", error=str(exc))
+                intent = "chat"
 
         # Dukung konfirmasi pendek (misal 'ya', 'oke', 'lanjut', 'hapus') setelah prompt konfirmasi
         if tools_available and intent == "chat" and trigger_text:
@@ -139,7 +174,7 @@ class AIReplyUseCase:
             intent=intent,
             text=trigger_text,
             settings=self._settings,
-            tools_enabled=tools_available,
+            tools_enabled=tools_available and image is None,
             is_group=is_group,
         )
 
@@ -183,11 +218,15 @@ class AIReplyUseCase:
 
         # Add the trigger message as the final "user" turn
         sender_label = trigger_message.push_name or trigger_message.sender_jid.user
-        display_trigger_text = trigger_text or "[media message]"
+        if image is not None:
+            display_trigger_text = trigger_text or AI_IMAGE_DEFAULT_PROMPT
+        else:
+            display_trigger_text = trigger_text or "[media message]"
         messages.append(
             ProviderMessage(
                 role="user",
                 content=f"[{sender_label}]: {_escape_role_spoof(display_trigger_text)}",
+                images=[image] if image is not None else None,
             )
         )
 
@@ -218,8 +257,10 @@ class AIReplyUseCase:
             )
 
         # 5. Persist trigger and AI reply to the context cache
+        # Bytes gambar tidak disimpan ke konteks; cukup penanda teks.
+        context_text = f"[gambar] {trigger_text}".strip() if image is not None else trigger_text
         await self._ai_service.append_to_context(
-            chat_jid_str, "user", f"[{sender_label}]: {trigger_text}"
+            chat_jid_str, "user", f"[{sender_label}]: {context_text}"
         )
         if response.text:
             response.text = strip_emojis(response.text)

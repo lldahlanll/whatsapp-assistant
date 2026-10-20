@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, DateTime, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Index, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from whatsapp_platform.infrastructure.database.base import Base
@@ -100,6 +100,8 @@ class FinanceTransactionModel(Base):
     """Transaksi keuangan (pemasukan, pengeluaran, transfer)."""
 
     __tablename__ = "finance_transactions"
+    # Nama index mengikuti migrasi a1b2c3d4e5f6 agar `alembic check` tidak melihat perbedaan.
+    __table_args__ = (Index("ix_finance_transactions_date", "transaction_date"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     human_tx_id: Mapped[str | None] = mapped_column(String(30), nullable=True, index=True)
@@ -111,7 +113,7 @@ class FinanceTransactionModel(Base):
     category_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     transaction_date: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, index=True, default=lambda: datetime.now(UTC)
+        DateTime, nullable=False, default=lambda: datetime.now(UTC)
     )
     transfer_to_account_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     is_reversed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
@@ -128,6 +130,7 @@ class FinanceBudgetModel(Base):
             "owner_jid", "category_id", "month", "year",
             name="uq_finance_budgets_owner_cat_month_year"
         ),
+        Index("ix_finance_budgets_period", "year", "month"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)

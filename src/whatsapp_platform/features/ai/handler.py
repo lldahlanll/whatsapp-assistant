@@ -6,7 +6,8 @@ import asyncio
 import hashlib
 import time
 from collections import defaultdict
-from typing import TYPE_CHECKING
+from dataclasses import replace
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -14,13 +15,22 @@ from whatsapp_platform.application.use_cases.ai_reply import AIReplyUseCase
 from whatsapp_platform.application.use_cases.send_message import SendMessageUseCase
 from whatsapp_platform.domain.entities.message import Message, MessageDirection
 from whatsapp_platform.domain.events.messaging_events import MessageReceived
-from whatsapp_platform.domain.value_objects.message_content import TextContent
+from whatsapp_platform.domain.value_objects.message_content import (
+    MediaContent,
+    MediaType,
+    TextContent,
+)
 from whatsapp_platform.features.ai.config_store import AIChatConfigStore
 from whatsapp_platform.features.ai.rate_guard import PerChatRateGuard
 from whatsapp_platform.features.customer_lookup.phone_extractor import extract_phone_cores
 from whatsapp_platform.infrastructure.ai.constants import (
     AI_FALLBACK_BUSY_MESSAGE,
     AI_FALLBACK_ERROR_MESSAGE,
+    AI_IMAGE_DEFAULT_MIME_TYPE,
+    AI_IMAGE_DOWNLOAD_FAILED_MESSAGE,
+    AI_IMAGE_SUPPORTED_MIME_TYPES,
+    AI_IMAGE_TOO_LARGE_MESSAGE,
+    AI_IMAGE_UNSUPPORTED_MESSAGE,
 )
 from whatsapp_platform.infrastructure.ai.interfaces import AllProvidersExhaustedError
 from whatsapp_platform.infrastructure.config.settings import Settings
@@ -31,6 +41,15 @@ if TYPE_CHECKING:
     from whatsapp_platform.domain.value_objects.jid import JID
 
 logger = structlog.get_logger()
+
+
+class ImageRejectedError(Exception):
+    """Gambar tidak bisa dianalisis; ``user_message`` dikirim balik ke pengguna."""
+
+    def __init__(self, reason: str, user_message: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.user_message = user_message
 
 
 class AIMessageHandler:
@@ -132,12 +151,43 @@ class AIMessageHandler:
         if msg.is_from_me:
             return
 
-        if not isinstance(msg.content, TextContent):
+        raw_msg = getattr(event, "raw_message", None) or getattr(msg, "raw_message", None)
+
+        # Teks biasa, atau gambar (caption opsional) jika vision aktif
+        image_content: MediaContent | None = None
+        if isinstance(msg.content, TextContent):
+            text = msg.content.text.strip()
+        elif (
+            isinstance(msg.content, MediaContent)
+            and msg.content.media_type == MediaType.IMAGE
+            and self._settings.ai_vision_enabled
+        ):
+            image_content = msg.content
+            text = (image_content.caption or "").strip()
+        else:
             return
 
-        text = msg.content.text.strip()
-        if not text or text.startswith(self._settings.command_prefix):
+        if text.startswith(self._settings.command_prefix):
             return
+        if not text and image_content is None:
+            return
+
+        # Gambar tanpa bytes hanya bisa diproses jika gateway bisa mengunduhnya
+        if image_content is not None and image_content.file_bytes is None and (
+            self._gateway is None or raw_msg is None
+        ):
+            logger.debug(
+                "AI image reply skipped: no gateway/raw message to download media",
+                message_id=msg.id,
+                chat=str(msg.chat_jid),
+            )
+            return
+
+        fingerprint_text = (
+            f"[image:{self._image_digest(raw_msg) or msg.id}] {text}"
+            if image_content is not None
+            else text
+        )
 
         # Guard 0b: Content-fingerprint dedup (catches same message with different IDs).
         # Because we are now running under a per-chat lock, this check is atomic:
@@ -146,7 +196,9 @@ class AIMessageHandler:
         # Use sender_jid.user (numeric only) to normalize LID vs phone-number JID:
         # Neonize fires 2 events — one with @s.whatsapp.net, one with @lid — same
         # person but different full JID strings, which would produce different fingerprints.
-        if self._is_content_duplicate_and_record(str(msg.chat_jid), msg.sender_jid.user, text):
+        if self._is_content_duplicate_and_record(
+            str(msg.chat_jid), msg.sender_jid.user, fingerprint_text
+        ):
             logger.debug(
                 "AI reply skipped: duplicate content fingerprint (Neonize multi-device quirk)",
                 message_id=msg.id,
@@ -167,8 +219,6 @@ class AIMessageHandler:
         config = await self._config_store.get(chat_jid_str)
         if not config.enabled:
             return
-
-        raw_msg = getattr(event, "raw_message", None) or getattr(msg, "raw_message", None)
 
         # Group chat guard: require bot @mention OR reply to bot message
         if msg.chat_jid.is_group:
@@ -202,10 +252,15 @@ class AIMessageHandler:
             await self._set_typing(msg.chat_jid, composing=True)
 
             try:
-                # 2. Send to LLM & Wait LLM Response
+                # 2. Unduh gambar (jika ada), lalu kirim ke LLM & tunggu respons
+                trigger_msg = (
+                    await self._attach_image(msg, image_content, raw_msg)
+                    if image_content is not None
+                    else msg
+                )
                 response = await self._ai_reply_uc.execute(
                     chat_jid_str=chat_jid_str,
-                    trigger_message=msg,
+                    trigger_message=trigger_msg,
                     model_override=config.model,
                 )
             finally:
@@ -222,6 +277,25 @@ class AIMessageHandler:
                 key_index=response.key_index_used,
                 latency_ms=round(response.latency_ms, 1),
             )
+        except ImageRejectedError as exc:
+            logger.info(
+                "AI image reply rejected",
+                chat=chat_jid_str,
+                message_id=msg.id,
+                reason=exc.reason,
+            )
+            try:
+                await self._send_msg_uc.execute(
+                    chat_jid_str,
+                    exc.user_message,
+                    quoted=quoted_target,
+                )
+            except Exception as send_exc:  # noqa: BLE001
+                logger.error(
+                    "Failed to send image rejection message",
+                    chat=chat_jid_str,
+                    error=str(send_exc),
+                )
         except AllProvidersExhaustedError:
             logger.error("All AI providers exhausted for request", chat=chat_jid_str)
             try:
@@ -255,6 +329,68 @@ class AIMessageHandler:
                     chat=chat_jid_str,
                     error=str(send_exc),
                 )
+
+    async def _attach_image(
+        self, msg: Message, content: MediaContent, raw_msg: Any
+    ) -> Message:
+        """Validasi & unduh gambar, kembalikan salinan pesan dengan bytes gambar terisi.
+
+        Raises:
+            ImageRejectedError: format tidak didukung, ukuran melebihi batas, atau unduhan gagal.
+        """
+        mime_type = (
+            (content.mime_type or AI_IMAGE_DEFAULT_MIME_TYPE).split(";")[0].strip().lower()
+        )
+        if mime_type not in AI_IMAGE_SUPPORTED_MIME_TYPES:
+            raise ImageRejectedError(f"unsupported_mime:{mime_type}", AI_IMAGE_UNSUPPORTED_MESSAGE)
+
+        max_bytes = self._settings.ai_image_max_bytes
+        too_large_message = AI_IMAGE_TOO_LARGE_MESSAGE.format(
+            max_mb=f"{max_bytes / (1024 * 1024):g}"
+        )
+
+        # Cek ukuran yang dideklarasikan WhatsApp sebelum mengunduh
+        declared_size = self._declared_image_size(raw_msg)
+        if declared_size > max_bytes:
+            raise ImageRejectedError(f"declared_size:{declared_size}", too_large_message)
+
+        data = content.file_bytes
+        if data is None:
+            if self._gateway is None:
+                raise ImageRejectedError("no_gateway", AI_IMAGE_DOWNLOAD_FAILED_MESSAGE)
+            try:
+                data = await self._gateway.download_media(raw_msg)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to download image for AI reply",
+                    chat=str(msg.chat_jid),
+                    message_id=msg.id,
+                    error=str(exc),
+                )
+                raise ImageRejectedError("download_failed", AI_IMAGE_DOWNLOAD_FAILED_MESSAGE) from exc
+
+        if not data:
+            raise ImageRejectedError("empty_image", AI_IMAGE_DOWNLOAD_FAILED_MESSAGE)
+        if len(data) > max_bytes:
+            raise ImageRejectedError(f"size:{len(data)}", too_large_message)
+
+        return replace(msg, content=replace(content, file_bytes=data, mime_type=mime_type))
+
+    @staticmethod
+    def _image_message_proto(raw_msg: Any) -> Any:
+        message = getattr(raw_msg, "Message", None) or raw_msg
+        return getattr(message, "imageMessage", None) if message is not None else None
+
+    @classmethod
+    def _image_digest(cls, raw_msg: Any) -> str:
+        """SHA256 file gambar dari protobuf WhatsApp (untuk dedup), kosong jika tidak ada."""
+        sha = getattr(cls._image_message_proto(raw_msg), "fileSHA256", b"")
+        return sha.hex() if isinstance(sha, bytes) and sha else ""
+
+    @classmethod
+    def _declared_image_size(cls, raw_msg: Any) -> int:
+        size = getattr(cls._image_message_proto(raw_msg), "fileLength", 0)
+        return size if isinstance(size, int) else 0
 
     async def _set_typing(self, chat_jid: JID, composing: bool) -> None:
         """Send typing presence indicator to chat if gateway is available."""

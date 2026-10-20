@@ -13,14 +13,6 @@ import json
 
 from whatsapp_platform.features.finance.formatter import format_tx_date
 
-# ── Mutation tools (original fast-path) ───────────────────────────────────────
-
-MUTATION_TOOLS: set[str] = {
-    "finance_add_expense",
-    "finance_add_income",
-    "finance_transfer",
-}
-
 GROUP_PRIVATE_TOOLS: set[str] = {
     "finance_get_balance",
     "finance_get_monthly_report",

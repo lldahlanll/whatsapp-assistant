@@ -46,3 +46,6 @@ default_session/
 
 # Lock file (keep for reproducible installs)
 # uv.lock — intentionally tracked
+
+# Backup otomatis DB sebelum migrasi
+storage/backups/

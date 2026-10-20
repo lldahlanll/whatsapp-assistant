@@ -25,6 +25,7 @@ from whatsapp_platform.infrastructure.ai.interfaces import (
     ProviderMessage,
     RateLimitError,
 )
+from whatsapp_platform.infrastructure.ai.providers.openai_format import build_openai_content
 
 logger = structlog.get_logger()
 
@@ -66,7 +67,7 @@ class OpenRouterProvider(ILLMProvider):
         """Call OpenRouter chat completions endpoint (OpenAI-compatible)."""
         payload = {
             "model": model,
-            "messages": [{"role": m.role, "content": m.content} for m in messages],
+            "messages": [{"role": m.role, "content": build_openai_content(m)} for m in messages],
         }
         headers = {
             "Authorization": f"Bearer {api_key}",

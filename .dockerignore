@@ -52,3 +52,4 @@ deployment/
 docker-compose*.yml
 CHANGELOG.md
 CONTRIBUTING.md
+storage/backups/

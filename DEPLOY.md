@@ -124,18 +124,48 @@ docker stats whatsapp-platform
 
 ---
 
-## 7. Update Berikutnya
+## 7. Update Berikutnya (tanpa migrasi manual)
+
+Di VPS cukup jalankan:
 
 ```bash
-# Pull perubahan terbaru
-git pull
-
-# Rebuild dan restart
-docker-compose up -d --build
-
-# Jalankan migrasi DB (jika ada)
-docker-compose exec app alembic upgrade head
+./scripts/deploy.sh
 ```
+
+Skrip ini menjalankan `git pull --ff-only`, menyimpan image lama sebagai `whatsapp-platform:previous`, build ulang, lalu restart container. Migrasi database **tidak perlu dijalankan manual**, karena saat startup app otomatis:
+
+1. Mengecek apakah ada revisi Alembic yang belum diterapkan.
+2. Jika ada, membuat backup SQLite di `storage/backups/` (5 terbaru disimpan). Jika backup gagal, migrasi dibatalkan.
+3. Menjalankan `alembic upgrade head`. Jika migrasi gagal, app berhenti dan tidak jalan dengan skema setengah jadi.
+
+Skrip menunggu log `Alembic migrations completed`; jika gagal, 50 baris log terakhir ditampilkan.
+
+### Rollback
+
+```bash
+./scripts/deploy.sh --rollback
+```
+
+Jika migrasi sudah mengubah skema dan versi lama tidak cocok, restore backup:
+
+```bash
+docker compose stop app
+docker compose run --rm --no-deps --entrypoint sh app -c 'ls -lt /app/storage/backups/'
+docker compose run --rm --no-deps --entrypoint sh app -c 'cp /app/storage/backups/<file-backup>.db /app/storage/session.db'
+./scripts/deploy.sh --rollback
+```
+
+### Aturan saat development (di local)
+
+Setiap kali mengubah model di `infrastructure/database/models.py`, buat file migrasi lalu commit bersama perubahan model:
+
+```bash
+uv run alembic revision --autogenerate -m "deskripsi_perubahan"
+```
+
+Test `tests/integration/test_migrations.py` akan **gagal** jika model berubah tanpa migrasi, atau jika migrasi tidak bisa upgrade/downgrade. Jalankan `uv run pytest` sebelum push.
+
+Agar update aman tanpa downtime saat rollback, usahakan migrasi bersifat *additive* (tambah kolom nullable/tabel baru). Hapus atau ubah nama kolom dilakukan bertahap di rilis terpisah.
 
 ---
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from whatsapp_platform.infrastructure.ai.constants import TRANSFER_VERB_PATTERN
 from whatsapp_platform.infrastructure.finance.tool_schema import FINANCE_TOOLS
 from whatsapp_platform.infrastructure.mikrotik.tool_schema import MIKROTIK_TOOLS, ToolDefinition
 
@@ -60,7 +61,7 @@ def _select_finance_tools(lower: str) -> list[ToolDefinition]:
         "top up", "topup", "top-up", "isi saldo", "tambah saldo",
         "tambahkan saldo", "tambah uang", "tambahkan uang", "isi ulang",
         "setor", "setor tunai", "deposit", "masukin", "masukkan",
-    ))
+    )) or bool(TRANSFER_VERB_PATTERN.search(lower))
     is_report = any(kw in lower for kw in ("rekap", "laporan", "summary", "bulan ini"))
     is_account_create = any(kw in lower for kw in (
         "buat rekening", "bikin rekening", "tambah rekening", "tambahkan rekening",

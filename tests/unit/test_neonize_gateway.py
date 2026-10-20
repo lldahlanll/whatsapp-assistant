@@ -312,3 +312,28 @@ class TestDispatchDomainEvent:
         await asyncio.sleep(0.05)
 
         assert len(received) == 0
+
+
+# ─── Download Media ────────────────────────────────────────────────────────────
+
+
+class TestNeonizeGatewayDownloadMedia:
+    @pytest.mark.asyncio
+    async def test_download_unwraps_message_ev_to_inner_message(self, gateway, mock_client):
+        inner = MagicMock(name="waE2E.Message")
+        ev = MagicMock(name="MessageEv")
+        ev.Message = inner
+        mock_client.download_any = MagicMock(return_value=b"img-bytes")
+
+        data = await gateway.download_media(ev)
+
+        assert data == b"img-bytes"
+        mock_client.download_any.assert_called_once_with(inner)
+
+    @pytest.mark.asyncio
+    async def test_download_none_raises_gateway_exception(self, gateway, mock_client):
+        ev = MagicMock(name="MessageEv")
+        mock_client.download_any = MagicMock(return_value=None)
+
+        with pytest.raises(GatewayException):
+            await gateway.download_media(ev)
