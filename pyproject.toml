@@ -13,7 +13,7 @@ authors = [
     { name = "Software Architect & Engineering Team" }
 ]
 dependencies = [
-    "neonize==0.4.3.post0",
+    "neonize==0.9.0",
     "pydantic>=2.10.0",
     "pydantic-settings>=2.7.0",
     "sqlalchemy>=2.0.35",
