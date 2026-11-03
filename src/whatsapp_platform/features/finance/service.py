@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -75,6 +76,16 @@ class CategoryNotFoundError(FinanceServiceError):
 
 class BudgetNotFoundError(FinanceServiceError):
     pass
+
+
+class ReversalTransactionError(FinanceServiceError):
+    """Baris pembatalan (reversal) tidak boleh di-reverse, diubah, atau dihapus."""
+
+    def __init__(self, tx: FinanceTransaction) -> None:
+        super().__init__(
+            f"Transaksi '{tx.human_tx_id or tx.id}' adalah pembatalan dari transaksi lain "
+            "dan tidak bisa diubah, dihapus, atau dibatalkan lagi."
+        )
 
 
 
@@ -205,16 +216,34 @@ class FinanceService:
     async def find_account_by_name(
         self, owner_jid: str, name: str
     ) -> FinanceAccount | None:
+        """Cari rekening aktif berdasarkan nama.
+
+        Urutan: nama persis (tanpa beda huruf besar/kecil), lalu kecocokan kata utuh
+        ("tabungan" → "BCA Tabungan", "rekening BCA" → "BCA"). Jika lebih dari satu
+        rekening cocok, minta user memilih alih-alih menebak.
+        """
         accounts = await self.get_accounts(owner_jid)
-        name_lower = name.lower()
-        for acc in accounts:
-            if (
-                acc.name.lower() == name_lower
-                or name_lower in acc.name.lower()
-                or acc.name.lower() in name_lower
-            ):
-                return acc
-        return None
+        name_lower = name.strip().lower()
+        if not name_lower:
+            return None
+
+        exact = [a for a in accounts if a.name.lower() == name_lower]
+        if exact:
+            return exact[0]
+
+        def word_match(needle: str, haystack: str) -> bool:
+            return re.search(rf"(?<!\w){re.escape(needle)}(?!\w)", haystack) is not None
+
+        matches = [
+            a for a in accounts
+            if word_match(name_lower, a.name.lower()) or word_match(a.name.lower(), name_lower)
+        ]
+        if len(matches) > 1:
+            names = ", ".join(f"'{a.name}'" for a in matches)
+            raise AccountRequiredError(
+                f"Ada beberapa rekening yang cocok dengan '{name}': {names}. Sebutkan nama lengkapnya."
+            )
+        return matches[0] if matches else None
 
     async def delete_account(
         self, owner_jid: str, name_or_id: str
@@ -466,6 +495,8 @@ class FinanceService:
             raise TransactionNotFoundError(f"Transaksi '{tx_id_or_human_id}' tidak ditemukan.")
         if orig_tx.is_reversed:
             raise TransactionAlreadyReversedError(f"Transaksi '{tx_id_or_human_id}' sudah pernah di-reverse.")
+        if orig_tx.reversal_of_id:
+            raise ReversalTransactionError(orig_tx)
 
         from_acc = await self._repo.get_account_by_id(orig_tx.account_id, owner_jid)
         if not from_acc:
@@ -540,6 +571,8 @@ class FinanceService:
             raise TransactionAlreadyReversedError(
                 f"Transaksi '{orig_tx.human_tx_id or orig_tx.id}' sudah di-reverse dan tidak dapat diubah."
             )
+        if orig_tx.reversal_of_id:
+            raise ReversalTransactionError(orig_tx)
 
         # 1. Resolve Account
         target_account_id = new_account_id or orig_tx.account_id
@@ -768,6 +801,8 @@ class FinanceService:
             raise TransactionAlreadyReversedError(
                 f"Transaksi '{tx_id_or_human_id}' sudah di-reverse dan tidak dapat dihapus."
             )
+        if tx.reversal_of_id:
+            raise ReversalTransactionError(tx)
         success = await self._repo.delete_transaction(tx.id, owner_jid)
         if success:
             logger.info("Transaction hard-deleted", owner=owner_jid, tx_id=tx.id)

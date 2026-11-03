@@ -95,6 +95,11 @@ _HELP_TEXT = (
 )
 
 
+def _command_idempotency_key(ctx: CommandContext) -> str | None:
+    """Event pesan yang sama diproses dua kali tidak boleh mencatat transaksi dua kali."""
+    return f"cmd:{ctx.message.id[:64]}" if ctx.message.id else None
+
+
 class FinanceCommandHandler(BaseCommandHandler):
 
     def __init__(self, finance_service: FinanceService) -> None:
@@ -228,6 +233,7 @@ class FinanceCommandHandler(BaseCommandHandler):
             amount=amount,
             description=description,
             account_id=account_id,
+            idempotency_key=_command_idempotency_key(ctx),
         )
         await ctx.reply(format_transaction_added(tx))
 
@@ -253,6 +259,7 @@ class FinanceCommandHandler(BaseCommandHandler):
             amount=amount,
             description=description,
             account_id=account_id,
+            idempotency_key=_command_idempotency_key(ctx),
         )
         await ctx.reply(format_transaction_added(tx))
 
@@ -295,6 +302,7 @@ class FinanceCommandHandler(BaseCommandHandler):
             amount=amount,
             from_account_id=from_acc.id,
             to_account_id=to_acc.id,
+            idempotency_key=_command_idempotency_key(ctx),
         )
         await ctx.reply(format_transaction_added(tx))
 

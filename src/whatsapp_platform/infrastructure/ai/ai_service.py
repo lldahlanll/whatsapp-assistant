@@ -358,8 +358,12 @@ class AIService:
         max_tool_result_chars: int = 1000,
         intent: str = "chat",
         request_id: str = "",
+        message_id: str | None = None,
     ) -> AIResponse:
-        """Generate a reply running an agentic tool calling loop with the executor."""
+        """Generate a reply running an agentic tool calling loop with the executor.
+
+        message_id: ID pesan WhatsApp pemicu; dipakai tool untuk idempotency & konfirmasi.
+        """
         curr_messages = list(messages)
         iterations = 0
 
@@ -395,6 +399,7 @@ class AIService:
                     arguments=tc.arguments,
                     user_jid=user_jid,
                     chat_jid=wa_chat_jid,
+                    message_id=message_id,
                 )
                 is_group = bool(getattr(wa_chat_jid, "is_group", False))
                 fast_path_reply = try_finance_mutation_fast_path(tc.name, tool_output, is_group=is_group)
@@ -446,6 +451,7 @@ class AIService:
                         arguments=tc.arguments,
                         user_jid=user_jid,
                         chat_jid=wa_chat_jid,
+                        message_id=message_id,
                     )
                     compacted_output = compact_tool_result(tc.name, tool_output, max_chars=max_tool_result_chars)
                     curr_messages.append(

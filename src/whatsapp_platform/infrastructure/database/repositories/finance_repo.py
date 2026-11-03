@@ -159,11 +159,13 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
             return [_account_from_model(m) for m in result.scalars().all()]
 
     async def get_account_by_id(self, account_id: str, owner_jid: str) -> FinanceAccount | None:
+        """Ambil rekening AKTIF milik owner; rekening yang sudah dihapus tidak bisa dipakai lagi."""
         async with self._session() as session:
             result = await session.execute(
                 select(FinanceAccountModel).where(
                     FinanceAccountModel.id == account_id,
                     FinanceAccountModel.owner_jid == owner_jid,
+                    FinanceAccountModel.is_active.is_(True),
                 )
             )
             m = result.scalar_one_or_none()
@@ -305,6 +307,7 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
                         FinanceTransactionModel.id == original_tx_id,
                         FinanceTransactionModel.owner_jid == owner_jid,
                         FinanceTransactionModel.is_reversed.is_(False),
+                        FinanceTransactionModel.reversal_of_id.is_(None),
                     )
                     .values(is_reversed=True)
                 )
@@ -736,8 +739,11 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
                 )
                 .values(balance=FinanceAccountModel.balance + delta)
             )
-            if delta < 0 and not allow_negative:
-                stmt = stmt.where(FinanceAccountModel.balance + delta >= 0)
+            if not allow_negative:
+                # Backstop atomik: rekening nonaktif tidak boleh bertransaksi lagi.
+                stmt = stmt.where(FinanceAccountModel.is_active.is_(True))
+                if delta < 0:
+                    stmt = stmt.where(FinanceAccountModel.balance + delta >= 0)
             result = await session.execute(stmt)
             if result.rowcount != 1:
                 raise FinanceBalanceConflictError(acc_id)

@@ -243,12 +243,24 @@ async def test_tool_executor_delete_account_confirmed(
     mock_service.find_account_by_name.return_value = bca_acc
     mock_service.delete_account.return_value = bca_acc
 
-    # Call with confirm=True
+    # Pesan 1: LLM langsung kirim confirm=True → tetap diminta konfirmasi dulu
+    first = await executor.execute(
+        tool_name="finance_delete_account",
+        arguments={"name": "BCA", "confirm": True},
+        user_jid=user_jid,
+        chat_jid=chat_jid,
+        message_id="msg-1",
+    )
+    assert json.loads(first)["status"] == "need_confirmation"
+    mock_service.delete_account.assert_not_called()
+
+    # Pesan 2: user menjawab "ya" → baru dieksekusi
     res_raw = await executor.execute(
         tool_name="finance_delete_account",
         arguments={"name": "BCA", "confirm": True},
         user_jid=user_jid,
         chat_jid=chat_jid,
+        message_id="msg-2",
     )
 
     data = json.loads(res_raw)

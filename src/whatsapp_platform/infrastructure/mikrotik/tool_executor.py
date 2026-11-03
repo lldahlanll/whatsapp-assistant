@@ -119,6 +119,7 @@ class MikroTikToolExecutor:
         arguments: dict[str, Any],
         user_jid: JID,
         chat_jid: JID,
+        message_id: str | None = None,  # interface parity; network tools are read-only
     ) -> str:
         """Execute a tool call requested by LLM and return JSON string response.
 

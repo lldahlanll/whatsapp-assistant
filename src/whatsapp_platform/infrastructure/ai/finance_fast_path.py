@@ -459,6 +459,17 @@ def _fast_update_transaction(data: dict) -> str | None:
 @_handler("finance_delete_transaction")
 def _fast_delete_transaction(data: dict) -> str | None:
     status = str(data.get("status", "")).lower()
+    if status == "need_confirmation":
+        lines = ["*Konfirmasi Hapus Transaksi*\n"]
+        if data.get("transaction_id"):
+            lines.append(f"ID: `{data['transaction_id']}`")
+        if data.get("description"):
+            lines.append(f"Catatan: {data['description']}")
+        lines.append(f"Nominal: {_fmt_rp(data.get('amount', 0))}")
+        if data.get("account"):
+            lines.append(f"Rekening: {data['account']}")
+        lines.append("\nSaldo rekening akan dikembalikan. Yakin ingin menghapusnya?")
+        return "\n".join(lines)
     if status != "success":
         error_msg = data.get("message", "")
         error_code = data.get("error_code", "")

@@ -49,12 +49,6 @@ FINANCE_TOOLS: list[ToolDefinition] = [
                 description="Tanggal transaksi (format: YYYY-MM-DD, misal: '2026-08-20'). Kosongkan jika transaksi hari ini.",
                 required=False,
             ),
-            ToolParameter(
-                name="idempotency_key",
-                type="string",
-                description="ID pesan unik untuk mencegah transaksi ganda (opsional).",
-                required=False,
-            ),
         ],
     ),
     ToolDefinition(
@@ -101,12 +95,6 @@ FINANCE_TOOLS: list[ToolDefinition] = [
                 description="Tanggal transaksi (format: YYYY-MM-DD, misal: '2026-08-20'). Kosongkan jika transaksi hari ini.",
                 required=False,
             ),
-            ToolParameter(
-                name="idempotency_key",
-                type="string",
-                description="ID pesan unik untuk mencegah transaksi ganda (opsional).",
-                required=False,
-            ),
         ],
     ),
     ToolDefinition(
@@ -144,12 +132,6 @@ FINANCE_TOOLS: list[ToolDefinition] = [
                 name="date",
                 type="string",
                 description="Tanggal transaksi (format: YYYY-MM-DD, misal: '2026-08-20'). Kosongkan jika transaksi hari ini.",
-                required=False,
-            ),
-            ToolParameter(
-                name="idempotency_key",
-                type="string",
-                description="ID pesan unik untuk mencegah transaksi ganda (opsional).",
                 required=False,
             ),
         ],
@@ -409,6 +391,7 @@ FINANCE_TOOLS: list[ToolDefinition] = [
             "Menghapus transaksi dari catatan keuangan. "
             "HARUS menggunakan transaction_id yang diperoleh dari finance_get_transaction_detail. "
             "Jangan menghapus berdasarkan deskripsi secara langsung — selalu resolve dulu. "
+            "Panggilan pertama hanya meminta konfirmasi; hapus terjadi setelah pengguna mengonfirmasi. "
             "Contoh: 'hapus transaksi kopi tadi', 'batalkan pencatatan makan siang kemarin'."
         ),
         parameters=[
@@ -417,6 +400,12 @@ FINANCE_TOOLS: list[ToolDefinition] = [
                 type="string",
                 description="ID transaksi yang akan dihapus (human ID seperti TXN-20260820-ABC123 atau UUID).",
                 required=True,
+            ),
+            ToolParameter(
+                name="confirm",
+                type="boolean",
+                description="Set true jika pengguna sudah memberikan konfirmasi eksplisit untuk menghapus transaksi.",
+                required=False,
             ),
         ],
     ),

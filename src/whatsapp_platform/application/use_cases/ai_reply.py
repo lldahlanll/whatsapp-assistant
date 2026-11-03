@@ -271,6 +271,7 @@ class AIReplyUseCase:
                 max_tool_result_chars=self._settings.ai_max_tool_result_chars,
                 intent=policy.intent,
                 request_id=request_id,
+                message_id=trigger_message.id,
             )
         else:
             response = await self._ai_service.generate_reply(

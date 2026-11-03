@@ -35,6 +35,7 @@ class CompositeToolExecutor:
         arguments: dict[str, Any],
         user_jid: JID,
         chat_jid: JID,
+        message_id: str | None = None,
     ) -> str:
         prefix = tool_name.split("_")[0] if "_" in tool_name else tool_name
 
@@ -51,4 +52,5 @@ class CompositeToolExecutor:
             arguments=arguments,
             user_jid=user_jid,
             chat_jid=chat_jid,
+            message_id=message_id,
         )
