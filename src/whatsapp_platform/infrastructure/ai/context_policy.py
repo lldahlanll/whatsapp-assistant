@@ -13,6 +13,7 @@ from whatsapp_platform.infrastructure.ai.constants import (
     AI_SYSTEM_PROMPT,
     IntentType,
 )
+from whatsapp_platform.infrastructure.ai.memory_tools import MEMORY_TOOLS, wants_memory_tools
 from whatsapp_platform.infrastructure.ai.tool_policy import select_tools
 
 if TYPE_CHECKING:
@@ -41,12 +42,19 @@ class ContextPolicyManager:
         settings: Settings,
         tools_enabled: bool = True,
         is_group: bool = False,
+        memory_enabled: bool = False,
     ) -> ContextPolicy:
         """Menentukan instruksi, jumlah riwayat pesan, dan alat yang dibutuhkan AI."""
+        # Permintaan "ingat/lupakan" di obrolan biasa butuh tool → pakai intent "memory"
+        # agar diarahkan ke model yang mendukung tool calling.
+        wants_memory = memory_enabled and tools_enabled and wants_memory_tools(text)
+        if wants_memory and intent in ("simple_chat", "chat"):
+            intent = "memory"
+
         # Determine history limit from env settings
         if intent == "simple_chat":
             history_limit = 0
-        elif intent == "chat":
+        elif intent in ("chat", "memory"):
             history_limit = settings.ai_chat_history_limit
         elif intent == "finance":
             history_limit = settings.ai_finance_history_limit
@@ -58,7 +66,7 @@ class ContextPolicyManager:
             history_limit = settings.ai_chat_history_limit
 
         # Resolve system prompt
-        if intent in ("simple_chat", "chat"):
+        if intent in ("simple_chat", "chat", "memory"):
             system_prompt = AI_SYSTEM_PROMPT
         elif intent == "finance":
             system_prompt = AI_FINANCE_GROUP_SYSTEM_PROMPT if is_group else AI_FINANCE_SYSTEM_PROMPT
@@ -71,6 +79,8 @@ class ContextPolicyManager:
 
         # Resolve dynamic tools if tools are enabled
         tools = select_tools(intent, text) if tools_enabled else None
+        if wants_memory:
+            tools = [*(tools or []), *MEMORY_TOOLS]
 
         return ContextPolicy(
             intent=intent,

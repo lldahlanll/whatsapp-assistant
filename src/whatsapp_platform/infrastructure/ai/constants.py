@@ -47,9 +47,10 @@ NINEROUTER_INTENT_MODEL_MAP: dict[str, str] = {
     "network": "tools-pool",
     "full": "tools-pool",
     "image": "vision-pool",
+    "memory": "tools-pool",
 }
 
-IntentType = Literal["simple_chat", "chat", "finance", "network", "full", "image"]
+IntentType = Literal["simple_chat", "chat", "finance", "network", "full", "image", "memory"]
 
 BASE_SYSTEM_PROMPT = (
     "You are Nara, a smart, friendly, and helpful personal assistant on WhatsApp.\n"
@@ -175,6 +176,32 @@ AI_IMAGE_UNSUPPORTED_MESSAGE = (
 AI_IMAGE_DOWNLOAD_FAILED_MESSAGE = (
     "Maaf, gambar gagal diunduh sehingga tidak bisa dianalisis. "
     "Silakan kirim ulang gambarnya."
+)
+
+# Voice note / transkripsi audio
+AI_AUDIO_TOO_LONG_MESSAGE = (
+    "Maaf, voice note terlalu panjang untuk diproses (maksimal {max_seconds} detik). "
+    "Silakan kirim voice note yang lebih singkat."
+)
+
+AI_AUDIO_TOO_LARGE_MESSAGE = (
+    "Maaf, voice note terlalu besar untuk diproses (maksimal {max_mb} MB)."
+)
+
+AI_AUDIO_UNSUPPORTED_MESSAGE = (
+    "Maaf, format audio ini belum didukung. Silakan kirim sebagai voice note WhatsApp."
+)
+
+AI_AUDIO_DOWNLOAD_FAILED_MESSAGE = (
+    "Maaf, voice note gagal diunduh. Silakan kirim ulang."
+)
+
+AI_AUDIO_EMPTY_TRANSCRIPT_MESSAGE = (
+    "Maaf, suara di voice note tidak terdengar jelas. Coba kirim ulang atau ketik pesannya."
+)
+
+AI_AUDIO_TRANSCRIPTION_FAILED_MESSAGE = (
+    "Maaf, voice note belum bisa diubah menjadi teks saat ini. Silakan ketik pesannya."
 )
 
 _AMOUNT_PATTERN = re.compile(

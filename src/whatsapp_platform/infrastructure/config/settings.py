@@ -135,6 +135,33 @@ class Settings(BaseSettings):
     ai_database_path: str = Field(
         default="./storage/ai_data.db", description="Path to AI persistence SQLite database"
     )
+    ai_memory_enabled: bool = Field(
+        default=True,
+        description="Memori persisten per pengguna: fakta yang diminta diingat disuntikkan ke system prompt",
+    )
+    ai_memory_max_entries: int = Field(
+        default=20, description="Jumlah maksimum catatan memori per pengguna per chat"
+    )
+    ai_memory_max_chars: int = Field(
+        default=1500, description="Total karakter maksimum memori per pengguna per chat"
+    )
+    ai_voice_enabled: bool = Field(
+        default=True,
+        description="Transkripsi voice note (Groq Whisper) lalu diproses seperti pesan teks",
+    )
+    ai_audio_max_bytes: int = Field(
+        default=10 * 1024 * 1024,
+        description="Ukuran maksimum voice note (byte) yang diunduh dan ditranskripsi",
+    )
+    ai_audio_max_seconds: int = Field(
+        default=180, description="Durasi maksimum voice note (detik) yang ditranskripsi"
+    )
+    ai_transcription_model: str = Field(
+        default="whisper-large-v3-turbo", description="Model transkripsi Groq Whisper"
+    )
+    ai_transcription_language: str = Field(
+        default="id", description="Kode bahasa ISO-639-1 untuk transkripsi (kosong = deteksi otomatis)"
+    )
 
     # MikroTik REST API & Network AI settings
     mikrotik_enabled: bool = Field(default=False, description="Enable MikroTik integration")

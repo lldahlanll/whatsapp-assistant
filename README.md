@@ -182,6 +182,9 @@ Semua perintah diawali dengan prefix `!` (bisa dikustomisasi via `COMMAND_PREFIX
 | `!ai reset` | Reset konteks percakapan AI |
 | `!ai model <nama>` | Ganti model AI per-chat |
 | `!ai stats` | Statistik penggunaan LLM (daily counters, key pool) |
+| `!ai memori` | Lihat hal yang diingat AI tentangmu di chat ini |
+| `!ai ingat <fakta>` | Minta AI mengingat sesuatu (nama panggilan, preferensi, dll.) |
+| `!ai lupa <nomor\|teks\|semua>` | Hapus memori AI milikmu |
 
 ### Keuangan (`!finance`)
 

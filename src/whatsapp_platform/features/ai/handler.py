@@ -23,6 +23,12 @@ from whatsapp_platform.domain.value_objects.message_content import (
 from whatsapp_platform.features.ai.config_store import AIChatConfigStore
 from whatsapp_platform.features.ai.rate_guard import PerChatRateGuard
 from whatsapp_platform.infrastructure.ai.constants import (
+    AI_AUDIO_DOWNLOAD_FAILED_MESSAGE,
+    AI_AUDIO_EMPTY_TRANSCRIPT_MESSAGE,
+    AI_AUDIO_TOO_LARGE_MESSAGE,
+    AI_AUDIO_TOO_LONG_MESSAGE,
+    AI_AUDIO_TRANSCRIPTION_FAILED_MESSAGE,
+    AI_AUDIO_UNSUPPORTED_MESSAGE,
     AI_FALLBACK_BUSY_MESSAGE,
     AI_FALLBACK_ERROR_MESSAGE,
     AI_IMAGE_DEFAULT_MIME_TYPE,
@@ -31,24 +37,27 @@ from whatsapp_platform.infrastructure.ai.constants import (
     AI_IMAGE_TOO_LARGE_MESSAGE,
     AI_IMAGE_UNSUPPORTED_MESSAGE,
 )
-from whatsapp_platform.infrastructure.ai.interfaces import AllProvidersExhaustedError
+from whatsapp_platform.infrastructure.ai.interfaces import AllProvidersExhaustedError, ProviderError
+from whatsapp_platform.infrastructure.ai.transcriber import SUPPORTED_AUDIO_MIME_TYPES
 from whatsapp_platform.infrastructure.config.settings import Settings
 
 if TYPE_CHECKING:
     from whatsapp_platform.application.interfaces.messaging_gateway import IMessagingGateway
     from whatsapp_platform.domain.repositories.message_repository import IMessageRepository
     from whatsapp_platform.domain.value_objects.jid import JID
+    from whatsapp_platform.infrastructure.ai.transcriber import GroqWhisperTranscriber
 
 logger = structlog.get_logger()
 
 
-class ImageRejectedError(Exception):
-    """Gambar tidak bisa dianalisis; ``user_message`` dikirim balik ke pengguna."""
+class MediaRejectedError(Exception):
+    """Gambar/voice note tidak bisa diproses; ``user_message`` dikirim balik ke pengguna."""
 
     def __init__(self, reason: str, user_message: str) -> None:
         super().__init__(reason)
         self.reason = reason
         self.user_message = user_message
+
 
 
 class AIMessageHandler:
@@ -64,6 +73,7 @@ class AIMessageHandler:
         message_repo: IMessageRepository | None = None,
         idempotency_ttl_seconds: float = 900.0,
         gateway: IMessagingGateway | None = None,
+        transcriber: GroqWhisperTranscriber | None = None,
     ) -> None:
         self._ai_reply_uc = ai_reply_uc
         self._send_msg_uc = send_msg_uc
@@ -73,6 +83,7 @@ class AIMessageHandler:
         self._message_repo = message_repo
         self._idempotency_ttl = idempotency_ttl_seconds
         self._gateway = gateway
+        self._transcriber = transcriber if settings.ai_voice_enabled else None
         self._processed_msg_ids: dict[str, float] = {}
         # Secondary dedup: fingerprint based on content (catches same message with different IDs)
         # TTL is short (10s) — hanya untuk de-bounce duplikat Neonize multi-device
@@ -152,8 +163,9 @@ class AIMessageHandler:
 
         raw_msg = getattr(event, "raw_message", None) or getattr(msg, "raw_message", None)
 
-        # Teks biasa, atau gambar (caption opsional) jika vision aktif
+        # Teks biasa, gambar (caption opsional) jika vision aktif, atau voice note jika transkripsi aktif
         image_content: MediaContent | None = None
+        audio_content: MediaContent | None = None
         if isinstance(msg.content, TextContent):
             text = msg.content.text.strip()
         elif (
@@ -163,30 +175,39 @@ class AIMessageHandler:
         ):
             image_content = msg.content
             text = (image_content.caption or "").strip()
+        elif (
+            isinstance(msg.content, MediaContent)
+            and msg.content.media_type == MediaType.AUDIO
+            and self._transcriber is not None
+        ):
+            audio_content = msg.content
+            text = ""
         else:
             return
 
         if text.startswith(self._settings.command_prefix):
             return
-        if not text and image_content is None:
+        media_content = image_content or audio_content
+        if not text and media_content is None:
             return
 
-        # Gambar tanpa bytes hanya bisa diproses jika gateway bisa mengunduhnya
-        if image_content is not None and image_content.file_bytes is None and (
+        # Media tanpa bytes hanya bisa diproses jika gateway bisa mengunduhnya
+        if media_content is not None and media_content.file_bytes is None and (
             self._gateway is None or raw_msg is None
         ):
             logger.debug(
-                "AI image reply skipped: no gateway/raw message to download media",
+                "AI media reply skipped: no gateway/raw message to download media",
                 message_id=msg.id,
                 chat=str(msg.chat_jid),
             )
             return
 
-        fingerprint_text = (
-            f"[image:{self._image_digest(raw_msg) or msg.id}] {text}"
-            if image_content is not None
-            else text
-        )
+        if image_content is not None:
+            fingerprint_text = f"[image:{self._image_digest(raw_msg) or msg.id}] {text}"
+        elif audio_content is not None:
+            fingerprint_text = f"[audio:{self._audio_digest(raw_msg) or msg.id}]"
+        else:
+            fingerprint_text = text
 
         # Guard 0b: Content-fingerprint dedup (catches same message with different IDs).
         # Because we are now running under a per-chat lock, this check is atomic:
@@ -242,12 +263,13 @@ class AIMessageHandler:
             await self._set_typing(msg.chat_jid, composing=True)
 
             try:
-                # 2. Unduh gambar (jika ada), lalu kirim ke LLM & tunggu respons
-                trigger_msg = (
-                    await self._attach_image(msg, image_content, raw_msg)
-                    if image_content is not None
-                    else msg
-                )
+                # 2. Unduh gambar / transkripsi voice note (jika ada), lalu kirim ke LLM
+                if image_content is not None:
+                    trigger_msg = await self._attach_image(msg, image_content, raw_msg)
+                elif audio_content is not None:
+                    trigger_msg = await self._transcribe_audio(msg, audio_content, raw_msg)
+                else:
+                    trigger_msg = msg
                 response = await self._ai_reply_uc.execute(
                     chat_jid_str=chat_jid_str,
                     trigger_message=trigger_msg,
@@ -268,9 +290,9 @@ class AIMessageHandler:
                 key_index=response.key_index_used,
                 latency_ms=round(response.latency_ms, 1),
             )
-        except ImageRejectedError as exc:
+        except MediaRejectedError as exc:
             logger.info(
-                "AI image reply rejected",
+                "AI media reply rejected",
                 chat=chat_jid_str,
                 message_id=msg.id,
                 reason=exc.reason,
@@ -283,7 +305,7 @@ class AIMessageHandler:
                 )
             except Exception as send_exc:  # noqa: BLE001
                 logger.error(
-                    "Failed to send image rejection message",
+                    "Failed to send media rejection message",
                     chat=chat_jid_str,
                     error=str(send_exc),
                 )
@@ -327,13 +349,13 @@ class AIMessageHandler:
         """Validasi & unduh gambar, kembalikan salinan pesan dengan bytes gambar terisi.
 
         Raises:
-            ImageRejectedError: format tidak didukung, ukuran melebihi batas, atau unduhan gagal.
+            MediaRejectedError: format tidak didukung, ukuran melebihi batas, atau unduhan gagal.
         """
         mime_type = (
             (content.mime_type or AI_IMAGE_DEFAULT_MIME_TYPE).split(";")[0].strip().lower()
         )
         if mime_type not in AI_IMAGE_SUPPORTED_MIME_TYPES:
-            raise ImageRejectedError(f"unsupported_mime:{mime_type}", AI_IMAGE_UNSUPPORTED_MESSAGE)
+            raise MediaRejectedError(f"unsupported_mime:{mime_type}", AI_IMAGE_UNSUPPORTED_MESSAGE)
 
         max_bytes = self._settings.ai_image_max_bytes
         too_large_message = AI_IMAGE_TOO_LARGE_MESSAGE.format(
@@ -343,12 +365,12 @@ class AIMessageHandler:
         # Cek ukuran yang dideklarasikan WhatsApp sebelum mengunduh
         declared_size = self._declared_image_size(raw_msg)
         if declared_size > max_bytes:
-            raise ImageRejectedError(f"declared_size:{declared_size}", too_large_message)
+            raise MediaRejectedError(f"declared_size:{declared_size}", too_large_message)
 
         data = content.file_bytes
         if data is None:
             if self._gateway is None:
-                raise ImageRejectedError("no_gateway", AI_IMAGE_DOWNLOAD_FAILED_MESSAGE)
+                raise MediaRejectedError("no_gateway", AI_IMAGE_DOWNLOAD_FAILED_MESSAGE)
             try:
                 data = await self._gateway.download_media(raw_msg)
             except Exception as exc:
@@ -358,14 +380,106 @@ class AIMessageHandler:
                     message_id=msg.id,
                     error=str(exc),
                 )
-                raise ImageRejectedError("download_failed", AI_IMAGE_DOWNLOAD_FAILED_MESSAGE) from exc
+                raise MediaRejectedError("download_failed", AI_IMAGE_DOWNLOAD_FAILED_MESSAGE) from exc
 
         if not data:
-            raise ImageRejectedError("empty_image", AI_IMAGE_DOWNLOAD_FAILED_MESSAGE)
+            raise MediaRejectedError("empty_image", AI_IMAGE_DOWNLOAD_FAILED_MESSAGE)
         if len(data) > max_bytes:
-            raise ImageRejectedError(f"size:{len(data)}", too_large_message)
+            raise MediaRejectedError(f"size:{len(data)}", too_large_message)
 
         return replace(msg, content=replace(content, file_bytes=data, mime_type=mime_type))
+
+    async def _transcribe_audio(
+        self, msg: Message, content: MediaContent, raw_msg: Any
+    ) -> Message:
+        """Unduh & transkripsi voice note, kembalikan salinan pesan sebagai TextContent.
+
+        Pesan hasil transkripsi diproses persis seperti pesan teks (intent, finance, memori).
+
+        Raises:
+            MediaRejectedError: format/durasi/ukuran tidak valid, unduhan atau transkripsi gagal.
+        """
+        mime_type = (content.mime_type or "audio/ogg").split(";")[0].strip().lower()
+        if mime_type not in SUPPORTED_AUDIO_MIME_TYPES:
+            raise MediaRejectedError(f"unsupported_audio_mime:{mime_type}", AI_AUDIO_UNSUPPORTED_MESSAGE)
+
+        max_seconds = self._settings.ai_audio_max_seconds
+        declared_seconds = self._declared_audio_seconds(raw_msg)
+        if declared_seconds > max_seconds:
+            raise MediaRejectedError(
+                f"audio_seconds:{declared_seconds}",
+                AI_AUDIO_TOO_LONG_MESSAGE.format(max_seconds=max_seconds),
+            )
+
+        max_bytes = self._settings.ai_audio_max_bytes
+        too_large_message = AI_AUDIO_TOO_LARGE_MESSAGE.format(max_mb=f"{max_bytes / (1024 * 1024):g}")
+        if self._declared_audio_size(raw_msg) > max_bytes:
+            raise MediaRejectedError("audio_declared_size", too_large_message)
+
+        data = content.file_bytes
+        if data is None:
+            if self._gateway is None:
+                raise MediaRejectedError("no_gateway", AI_AUDIO_DOWNLOAD_FAILED_MESSAGE)
+            try:
+                data = await self._gateway.download_media(raw_msg)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to download voice note for AI reply",
+                    chat=str(msg.chat_jid),
+                    message_id=msg.id,
+                    error=str(exc),
+                )
+                raise MediaRejectedError("audio_download_failed", AI_AUDIO_DOWNLOAD_FAILED_MESSAGE) from exc
+
+        if not data:
+            raise MediaRejectedError("empty_audio", AI_AUDIO_DOWNLOAD_FAILED_MESSAGE)
+        if len(data) > max_bytes:
+            raise MediaRejectedError(f"audio_size:{len(data)}", too_large_message)
+
+        if self._transcriber is None:
+            raise MediaRejectedError("no_transcriber", AI_AUDIO_TRANSCRIPTION_FAILED_MESSAGE)
+        try:
+            transcript = await self._transcriber.transcribe(data, mime_type)
+        except (ProviderError, AllProvidersExhaustedError) as exc:
+            logger.warning(
+                "Voice note transcription failed",
+                chat=str(msg.chat_jid),
+                message_id=msg.id,
+                error=str(exc),
+            )
+            raise MediaRejectedError("transcription_failed", AI_AUDIO_TRANSCRIPTION_FAILED_MESSAGE) from exc
+
+        if not transcript:
+            raise MediaRejectedError("empty_transcript", AI_AUDIO_EMPTY_TRANSCRIPT_MESSAGE)
+
+        logger.info(
+            "Voice note transcribed",
+            chat=str(msg.chat_jid),
+            message_id=msg.id,
+            audio_bytes=len(data),
+            transcript_chars=len(transcript),
+        )
+        return replace(msg, content=TextContent(text=transcript))
+
+    @staticmethod
+    def _audio_message_proto(raw_msg: Any) -> Any:
+        message = getattr(raw_msg, "Message", None) or raw_msg
+        return getattr(message, "audioMessage", None) if message is not None else None
+
+    @classmethod
+    def _audio_digest(cls, raw_msg: Any) -> str:
+        sha = getattr(cls._audio_message_proto(raw_msg), "fileSHA256", b"")
+        return sha.hex() if isinstance(sha, bytes) and sha else ""
+
+    @classmethod
+    def _declared_audio_seconds(cls, raw_msg: Any) -> int:
+        seconds = getattr(cls._audio_message_proto(raw_msg), "seconds", 0)
+        return seconds if isinstance(seconds, int) else 0
+
+    @classmethod
+    def _declared_audio_size(cls, raw_msg: Any) -> int:
+        size = getattr(cls._audio_message_proto(raw_msg), "fileLength", 0)
+        return size if isinstance(size, int) else 0
 
     @staticmethod
     def _image_message_proto(raw_msg: Any) -> Any:

@@ -55,6 +55,16 @@ class AISQLiteStore:
             );
 
             CREATE INDEX IF NOT EXISTS idx_chat_context_chat_id ON chat_context (chat_id);
+
+            CREATE TABLE IF NOT EXISTS user_memory (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_user_memory_scope ON user_memory (chat_id, user_id);
             """
         )
         # Migrasi ringan untuk database lama yang belum punya kolom reset konteks
@@ -172,4 +182,34 @@ class AISQLiteStore:
             )
         """
         await self._conn.execute(sql, (chat_id, chat_id, max_messages))
+        await self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # User Memory operations
+    # ------------------------------------------------------------------
+
+    async def load_all_memories(self) -> dict[tuple[str, str], list[str]]:
+        """Load all user memory entries grouped by (chat_id, user_id), oldest first."""
+        if not self._conn:
+            raise RuntimeError("AISQLiteStore not initialized")
+        async with self._conn.execute(
+            "SELECT chat_id, user_id, content FROM user_memory ORDER BY id ASC"
+        ) as cursor:
+            rows = await cursor.fetchall()
+            result: dict[tuple[str, str], list[str]] = {}
+            for row in rows:
+                result.setdefault((row["chat_id"], row["user_id"]), []).append(row["content"])
+            return result
+
+    async def replace_memories(self, chat_id: str, user_id: str, entries: list[str]) -> None:
+        """Replace all memory entries for one (chat_id, user_id) scope atomically."""
+        if not self._conn:
+            raise RuntimeError("AISQLiteStore not initialized")
+        await self._conn.execute(
+            "DELETE FROM user_memory WHERE chat_id = ? AND user_id = ?", (chat_id, user_id)
+        )
+        await self._conn.executemany(
+            "INSERT INTO user_memory (chat_id, user_id, content) VALUES (?, ?, ?)",
+            [(chat_id, user_id, entry) for entry in entries],
+        )
         await self._conn.commit()

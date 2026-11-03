@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Memori AI per pengguna**: fakta yang diminta diingat (lewat `!ai ingat <fakta>` atau kalimat seperti
+  "tolong ingat ya ...", "panggil aku ...") disimpan di SQLite (`user_memory`) dan disuntikkan ke system prompt.
+  Scope per (chat, pengirim), dibatasi jumlah/karakter, dan teks berisi instruksi ke AI ditolak.
+  Perintah baru: `!ai memori`, `!ai ingat`, `!ai lupa <nomor|teks|semua>`. Tool LLM: `memory_save`, `memory_forget`.
+- **Voice note**: voice note yang memicu AI ditranskripsi dengan Groq Whisper (key pool terpisah dari chat)
+  lalu diproses seperti pesan teks, termasuk pencatatan keuangan. Batas durasi/ukuran dicek sebelum mengunduh.
+
 ## [0.1.0] - 2026-08-07
 
 ### Added

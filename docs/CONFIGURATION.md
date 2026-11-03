@@ -119,6 +119,14 @@ Untuk pengguna yang menjalankan LLM router sendiri (OpenAI-compatible):
 | `AI_HTTP_TIMEOUT_SECONDS` | `30.0` | Timeout HTTP request ke AI provider |
 | `AI_VISION_ENABLED` | `true` | Analisis gambar: pesan gambar (opsional caption) yang memicu AI dikirim ke model vision (`NINEROUTER_MODEL_VISION`) |
 | `AI_IMAGE_MAX_BYTES` | `5242880` | Ukuran maksimum gambar (byte, default 5 MB); gambar lebih besar ditolak dengan pesan ke user |
+| `AI_MEMORY_ENABLED` | `true` | Memori jangka panjang per pengguna. Fakta disimpan lewat `!ai ingat` atau kalimat seperti "tolong ingat ya ...", lalu disuntikkan ke system prompt. Scope per (chat, pengirim): memori chat pribadi tidak muncul di grup |
+| `AI_MEMORY_MAX_ENTRIES` | `20` | Maksimum catatan memori per pengguna per chat |
+| `AI_MEMORY_MAX_CHARS` | `1500` | Maksimum total karakter memori per pengguna per chat (membatasi tambahan token per balasan) |
+| `AI_VOICE_ENABLED` | `true` | Voice note yang memicu AI ditranskripsi dengan Groq Whisper lalu diproses seperti pesan teks (termasuk pencatatan keuangan). Butuh `GROQ_API_KEYS`; di grup hanya diproses jika membalas pesan bot |
+| `AI_AUDIO_MAX_SECONDS` | `180` | Durasi maksimum voice note (detik); dicek sebelum diunduh |
+| `AI_AUDIO_MAX_BYTES` | `10485760` | Ukuran maksimum voice note (byte, default 10 MB) |
+| `AI_TRANSCRIPTION_MODEL` | `whisper-large-v3-turbo` | Model transkripsi Groq |
+| `AI_TRANSCRIPTION_LANGUAGE` | `id` | Kode bahasa ISO-639-1 untuk transkripsi; kosong = deteksi otomatis |
 
 **Pengaturan history per-intent:**
 

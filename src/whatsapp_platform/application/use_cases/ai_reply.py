@@ -35,6 +35,7 @@ from whatsapp_platform.infrastructure.config.settings import Settings
 from whatsapp_platform.shared.utils.timezone import now_local
 
 if TYPE_CHECKING:
+    from whatsapp_platform.features.ai.memory_store import UserMemoryStore
     from whatsapp_platform.infrastructure.ai.composite_executor import CompositeToolExecutor
     from whatsapp_platform.infrastructure.mikrotik.tool_executor import MikroTikToolExecutor
 
@@ -123,6 +124,7 @@ class AIReplyUseCase:
         context_window_messages: int = 20,
         max_context_chars: int = 16000,
         settings: Settings | None = None,
+        memory_store: UserMemoryStore | None = None,
     ) -> None:
         self._ai_service = ai_service
         self._get_conv_uc = get_conv_uc
@@ -130,6 +132,7 @@ class AIReplyUseCase:
         self._context_window_messages = context_window_messages
         self._max_context_chars = max_context_chars
         self._settings = settings or Settings()
+        self._memory_store = memory_store if self._settings.ai_memory_enabled else None
 
     async def execute(
         self,
@@ -199,6 +202,7 @@ class AIReplyUseCase:
             settings=self._settings,
             tools_enabled=tools_available and image is None,
             is_group=is_group,
+            memory_enabled=self._memory_store is not None,
         )
 
         # 3. Fetch DB conversation history using policy.history_limit (with fallback guard)
@@ -230,8 +234,12 @@ class AIReplyUseCase:
             tool_count=len(policy.tools) if policy.tools else 0,
         )
 
+        system_content = f"{policy.system_prompt}\n\n{_current_date_note()}"
+        memory_block = await self._render_memory(chat_jid_str, trigger_message)
+        if memory_block:
+            system_content = f"{system_content}\n\n{memory_block}"
         messages: list[ProviderMessage] = [
-            ProviderMessage(role="system", content=f"{policy.system_prompt}\n\n{_current_date_note()}"),
+            ProviderMessage(role="system", content=system_content),
         ]
 
         # Add DB history (excludes the trigger message which is appended below)
@@ -296,6 +304,19 @@ class AIReplyUseCase:
 
         return response
 
+
+    async def _render_memory(self, chat_jid_str: str, trigger_message: Message) -> str:
+        """Blok memori pengguna untuk system prompt; gagal baca memori tidak menggagalkan balasan."""
+        if self._memory_store is None:
+            return ""
+        try:
+            block = await self._memory_store.render_for_prompt(
+                chat_jid_str, str(trigger_message.sender_jid)
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to load user memory", chat=chat_jid_str, error=str(exc))
+            return ""
+        return _escape_role_spoof(block)
 
     def _truncate_to_char_budget(
         self, messages: list[Message], chat_jid_str: str

@@ -182,8 +182,27 @@ class Container(IContainer):
                 "network": tools_model,
                 "full": tools_model,
                 "image": vision_model,
+                "memory": tools_model,
             }
         }
+
+        # Voice note: pool terpisah dari chat agar limit audio tidak mendinginkan key chat
+        from whatsapp_platform.infrastructure.ai.transcriber import GroqWhisperTranscriber
+
+        transcriber: GroqWhisperTranscriber | None = None
+        if self.settings.ai_voice_enabled and self.settings.groq_api_keys:
+            transcriber = GroqWhisperTranscriber(
+                self._http_client,
+                KeyPool(
+                    cast(list[str], self.settings.groq_api_keys),
+                    default_cooldown_seconds=self.settings.ai_cooldown_default_seconds,
+                ),
+                model=self.settings.ai_transcription_model,
+                language=self.settings.ai_transcription_language,
+                cooldown_default=self.settings.ai_cooldown_default_seconds,
+            )
+        elif self.settings.ai_voice_enabled:
+            logger.info("Voice note transcription disabled: GROQ_API_KEYS kosong")
 
         strategy = FixedPriorityStrategy(DEFAULT_PROVIDER_ORDER)
         ai_service = AIService(
@@ -244,6 +263,22 @@ class Container(IContainer):
         composite_executor = CompositeToolExecutor()
         composite_executor.register("mikrotik", mikrotik_tool_executor)
         composite_executor.register("finance", finance_tool_executor)
+
+        from whatsapp_platform.features.ai.memory_store import MemoryLimits, UserMemoryStore
+        from whatsapp_platform.infrastructure.ai.memory_executor import MemoryToolExecutor
+
+        memory_store = UserMemoryStore(
+            db_store=ai_sqlite_store,
+            limits=MemoryLimits(
+                max_entries=self.settings.ai_memory_max_entries,
+                max_total_chars=self.settings.ai_memory_max_chars,
+            ),
+        )
+        await memory_store.initialize()
+        self.register(UserMemoryStore, memory_store)
+        if self.settings.ai_memory_enabled:
+            composite_executor.register("memory", MemoryToolExecutor(memory_store))
+
         self.register(CompositeToolExecutor, composite_executor)
 
         ai_reply_uc = AIReplyUseCase(
@@ -252,6 +287,7 @@ class Container(IContainer):
             tool_executor=composite_executor,
             context_window_messages=self.settings.ai_context_window_messages,
             max_context_chars=self.settings.ai_max_context_chars,
+            memory_store=memory_store,
         )
 
         ai_config_store = AIChatConfigStore(
@@ -265,6 +301,7 @@ class Container(IContainer):
         )
 
         self.register(AISQLiteStore, ai_sqlite_store)
+        self.register(GroqWhisperTranscriber, transcriber)
         self.register(AIService, ai_service)
         self.register(AIReplyUseCase, ai_reply_uc)
         self.register(AIChatConfigStore, ai_config_store)
