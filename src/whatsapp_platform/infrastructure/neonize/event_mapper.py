@@ -29,6 +29,49 @@ logger = structlog.get_logger()
 
 class NeonizeEventMapper:
     @staticmethod
+    def _alt_phone_jid(alt_obj: Any) -> JID | None:
+        """Parse a SenderAlt/RecipientAlt proto into a phone-number JID, if it is one."""
+        if isinstance(alt_obj, str):
+            raw = alt_obj
+        elif isinstance(getattr(alt_obj, "User", None), str) and alt_obj.User:
+            raw = Jid2String(alt_obj)
+        else:
+            return None
+        try:
+            jid = JID.parse(raw)
+        except InvalidJIDError:
+            return None
+        return jid if jid.server == "s.whatsapp.net" else None
+
+    @staticmethod
+    def _prefer_phone_identity(
+        source: Any, chat_jid: JID, sender_jid: JID, is_from_me: bool
+    ) -> tuple[JID, JID]:
+        """Map LID-addressed identities to the phone-number JID when WhatsApp provides it.
+
+        WhatsApp may address the same person as ``<lid>@lid`` or ``<phone>@s.whatsapp.net``.
+        Features key data on these JIDs (finance owner, admin lists, chat config), so one
+        person must always map to one JID.
+        """
+        if source is None:
+            return chat_jid, sender_jid
+
+        if sender_jid.server == "lid":
+            sender_alt = NeonizeEventMapper._alt_phone_jid(getattr(source, "SenderAlt", None))
+            if sender_alt:
+                # In a private chat the chat JID is the sender's own (LID) JID.
+                if not chat_jid.is_group and chat_jid == sender_jid:
+                    chat_jid = sender_alt
+                sender_jid = sender_alt
+
+        if not chat_jid.is_group and chat_jid.server == "lid" and is_from_me:
+            recipient_alt = NeonizeEventMapper._alt_phone_jid(getattr(source, "RecipientAlt", None))
+            if recipient_alt:
+                chat_jid = recipient_alt
+
+        return chat_jid, sender_jid
+
+    @staticmethod
     def map_message_ev(ev: MessageEv) -> MessageReceived:
         """Map Neonize MessageEv Protobuf event into MessageReceived domain event."""
         info = getattr(ev, "Info", None)
@@ -54,6 +97,9 @@ class NeonizeEventMapper:
 
         chat_jid = JID.parse(chat_jid_str)
         sender_jid = JID.parse(sender_jid_str)
+        chat_jid, sender_jid = NeonizeEventMapper._prefer_phone_identity(
+            source, chat_jid, sender_jid, is_from_me
+        )
 
         # Extract text or media content
         msg_obj = getattr(ev, "Message", None)

@@ -168,6 +168,6 @@ Agar update aman tanpa downtime saat rollback, usahakan migrasi bersifat *additi
 > Keduanya sudah masuk `.gitignore`.
 
 - Gunakan password yang kuat untuk API Keys
-- Set `API_KEY` di `.env.docker` untuk proteksi REST API
+- Set `API_KEY` di `.env.docker`; tanpa itu endpoint `/api/v1/*` ditolak (503)
 - Pertimbangkan firewall untuk membatasi akses port `8077` hanya dari IP tertentu
 - Rotate API keys secara berkala

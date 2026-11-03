@@ -62,6 +62,8 @@ class Application:
         await feature_registry.initialize_all(self.container)
 
         if self.settings.api_enabled:
+            if not self.settings.api_key:
+                logger.warning("API_KEY kosong: endpoint /api/v1/* menolak semua request (503) sampai diisi")
             self._api_task = asyncio.create_task(self._run_api_server())
             logger.info(
                 "🌐 REST API server starting",

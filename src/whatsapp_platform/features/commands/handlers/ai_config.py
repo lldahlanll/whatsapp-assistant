@@ -42,12 +42,13 @@ class AIChatCommandHandler(BaseCommandHandler):
         self._ai_service = ai_service
         self._admin_jids = set(cast(list[str], settings.ai_admin_jids)) if settings else set()
         if not self._admin_jids:
-            logger.warning("AI_ADMIN_JIDS kosong: !ai on/off/reset/model/stats hanya bisa dari nomor bot sendiri")
+            logger.warning("AI_ADMIN_JIDS kosong: tidak ada yang bisa menjalankan !ai on/off/reset/model/stats")
 
     def _is_admin(self, msg: Message) -> bool:
-        """Admin = nomor bot sendiri, atau pengirim yang terdaftar di AI_ADMIN_JIDS (nomor atau JID lengkap)."""
-        if msg.is_from_me:
-            return True
+        """Admin = pengirim yang terdaftar di AI_ADMIN_JIDS (nomor atau JID lengkap).
+
+        Pesan dari nomor bot sendiri tidak pernah sampai ke sini (router mengabaikan is_from_me).
+        """
         sender = msg.sender_jid
         return str(sender) in self._admin_jids or sender.user in self._admin_jids
 

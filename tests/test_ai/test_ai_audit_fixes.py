@@ -116,18 +116,15 @@ async def test_admin_can_enable_and_status_is_public() -> None:
     assert "STATUS AI" in _reply_text(status_ctx)
 
 
-async def test_empty_admin_list_only_allows_bot_owner_number() -> None:
+async def test_empty_admin_list_allows_nobody() -> None:
     store = AIChatConfigStore()
     handler = AIChatCommandHandler(store, AsyncMock(), Settings(ai_admin_jids=""))
 
-    ctx = _command_ctx("!ai on", sender=STRANGER)
-    await handler.handle(ctx)
-    assert "khusus admin" in _reply_text(ctx)
-
-    own_ctx = _command_ctx("!ai on", sender=ADMIN)
-    own_ctx.message.is_from_me = True
-    await handler.handle(own_ctx)
-    assert "Diaktifkan" in _reply_text(own_ctx)
+    for sender in (STRANGER, ADMIN):
+        ctx = _command_ctx("!ai on", sender=sender)
+        await handler.handle(ctx)
+        assert "khusus admin" in _reply_text(ctx)
+    assert (await store.get(f"{ADMIN}@s.whatsapp.net")).enabled is False
 
 
 # ── 2. Gemini key never in the URL ──────────────────────────────────────────

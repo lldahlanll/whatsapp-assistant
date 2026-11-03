@@ -17,12 +17,15 @@ class NetworkPermissionChecker:
     def has_network_read_permission(self, sender_jid: JID, chat_jid: JID | None = None) -> bool:
         """Verify network_read permission based on whitelist configuration.
 
-        If network_allowed_jids is empty, all chats/users are allowed by default.
-        If populated, either the sender JID or the chat JID (for group chats) must be in the whitelist.
+        Either the sender JID/number or the chat JID (for group chats) must be in
+        NETWORK_ALLOWED_JIDS. If that list is empty, AI_ADMIN_JIDS is used instead.
+        If both are empty, nobody is allowed (router data is sensitive).
         """
-        allowed_jids = cast(list[str], self._settings.network_allowed_jids)
+        allowed_jids = cast(list[str], self._settings.network_allowed_jids) or cast(
+            list[str], self._settings.ai_admin_jids
+        )
         if not allowed_jids:
-            return True
+            return False
 
         sender_str = str(sender_jid)
         sender_phone = sender_jid.user

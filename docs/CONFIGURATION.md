@@ -55,7 +55,7 @@ Database SQLite akan otomatis dibuat dan di-migrasi saat startup menggunakan Ale
 | `API_ENABLED` | `true` | Aktifkan REST API server |
 | `API_HOST` | `0.0.0.0` | Host bind API server |
 | `API_PORT` | `8077` | Port API server |
-| `API_KEY` | _(kosong)_ | Secret key untuk autentikasi `X-API-Key`. Kosong = API tidak dilindungi |
+| `API_KEY` | _(kosong)_ | Secret key untuk autentikasi `X-API-Key`. Kosong = semua endpoint `/api/v1/*` ditolak (503); `/health` tetap terbuka |
 
 **Endpoints yang tersedia** (jika `API_ENABLED=true`):
 
@@ -115,7 +115,7 @@ Untuk pengguna yang menjalankan LLM router sendiri (OpenAI-compatible):
 | `AI_MAX_CONTEXT_CHARS` | `16000` | Max karakter konteks yang dikirim ke LLM |
 | `AI_BOT_MENTION_NAME` | _(kosong)_ | Nama bot untuk deteksi @mention di group chat |
 | `AI_DEFAULT_ENABLED` | `false` | Chat baru langsung dibalas AI. Default mati: aktifkan per chat dengan `!ai on` agar orang asing tidak memakai kuota |
-| `AI_ADMIN_JIDS` | _(kosong)_ | Nomor/JID yang boleh menjalankan `!ai on/off/reset/model/stats` (comma-separated). Kosong = hanya dari nomor bot sendiri. `!ai status` tetap terbuka |
+| `AI_ADMIN_JIDS` | _(kosong)_ | Nomor/JID yang boleh menjalankan `!ai on/off/reset/model/stats` (comma-separated). Kosong = tidak ada yang bisa menjalankan perintah tersebut (nomor bot sendiri juga tidak, karena pesan dari nomor bot diabaikan). `!ai status` tetap terbuka |
 | `AI_HTTP_TIMEOUT_SECONDS` | `30.0` | Timeout HTTP request ke AI provider |
 | `AI_VISION_ENABLED` | `true` | Analisis gambar: pesan gambar (opsional caption) yang memicu AI dikirim ke model vision (`NINEROUTER_MODEL_VISION`) |
 | `AI_IMAGE_MAX_BYTES` | `5242880` | Ukuran maksimum gambar (byte, default 5 MB); gambar lebih besar ditolak dengan pesan ke user |
@@ -157,7 +157,7 @@ Integrasi dengan router MikroTik via REST API.
 
 | Variable | Default | Deskripsi |
 |---|---|---|
-| `NETWORK_ALLOWED_JIDS` | _(kosong)_ | Whitelist JID yang boleh menjalankan perintah network (comma-separated). Kosong = semua boleh |
+| `NETWORK_ALLOWED_JIDS` | _(kosong)_ | Whitelist nomor/JID (user atau group) yang boleh membaca data router (comma-separated). Kosong = memakai `AI_ADMIN_JIDS`; keduanya kosong = tidak ada yang boleh |
 
 **Cache TTL (seconds):**
 
