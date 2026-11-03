@@ -114,6 +114,8 @@ Untuk pengguna yang menjalankan LLM router sendiri (OpenAI-compatible):
 | `AI_CONTEXT_WINDOW_MESSAGES` | `20` | Max pesan dalam konteks LLM |
 | `AI_MAX_CONTEXT_CHARS` | `16000` | Max karakter konteks yang dikirim ke LLM |
 | `AI_BOT_MENTION_NAME` | _(kosong)_ | Nama bot untuk deteksi @mention di group chat |
+| `AI_DEFAULT_ENABLED` | `false` | Chat baru langsung dibalas AI. Default mati: aktifkan per chat dengan `!ai on` agar orang asing tidak memakai kuota |
+| `AI_ADMIN_JIDS` | _(kosong)_ | Nomor/JID yang boleh menjalankan `!ai on/off/reset/model/stats` (comma-separated). Kosong = hanya dari nomor bot sendiri. `!ai status` tetap terbuka |
 | `AI_HTTP_TIMEOUT_SECONDS` | `30.0` | Timeout HTTP request ke AI provider |
 | `AI_VISION_ENABLED` | `true` | Analisis gambar: pesan gambar (opsional caption) yang memicu AI dikirim ke model vision (`NINEROUTER_MODEL_VISION`) |
 | `AI_IMAGE_MAX_BYTES` | `5242880` | Ukuran maksimum gambar (byte, default 5 MB); gambar lebih besar ditolak dengan pesan ke user |

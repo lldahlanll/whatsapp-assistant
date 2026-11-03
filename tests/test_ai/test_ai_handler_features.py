@@ -183,8 +183,8 @@ async def test_handler_fallback_send_failure_handled_gracefully():
 
 
 @pytest.mark.asyncio
-async def test_personal_chat_connects_directly_to_ai():
-    """Personal chat DM automatically connects to AI without explicit !ai on command."""
+async def test_personal_chat_requires_opt_in_unless_default_enabled():
+    """Chat baru tidak dibalas AI kecuali di-!ai on atau AI_DEFAULT_ENABLED=true."""
     mock_ai_reply_uc = AsyncMock()
     mock_ai_reply_uc.execute = AsyncMock(
         return_value=AIResponse(
@@ -208,11 +208,21 @@ async def test_personal_chat_connects_directly_to_ai():
         settings=settings,
     )
 
-    # Personal chat event (no mention, no prior config setup)
+    # Personal chat event (no mention, no prior config setup) -> default off, stranger tidak dibalas
     event = _make_event(msg_id="pc_msg_1", text="Hello AI assistant", chat_jid="628123456789@s.whatsapp.net")
     await handler.on_message_received(event)
+    mock_ai_reply_uc.execute.assert_not_awaited()
 
-    # Should process directly!
+    # Dengan AI_DEFAULT_ENABLED=true, chat baru langsung dibalas
+    handler = AIMessageHandler(
+        ai_reply_uc=mock_ai_reply_uc,
+        send_msg_uc=mock_send_msg_uc,
+        config_store=AIChatConfigStore(default_enabled=True),
+        rate_guard=rate_guard,
+        settings=settings,
+    )
+    event = _make_event(msg_id="pc_msg_2", text="Hello AI assistant", chat_jid="628123456789@s.whatsapp.net")
+    await handler.on_message_received(event)
     mock_ai_reply_uc.execute.assert_awaited_once()
     mock_send_msg_uc.execute.assert_awaited_once_with("628123456789@s.whatsapp.net", "Halo dari AI!", quoted=None)
 
@@ -235,6 +245,7 @@ async def test_group_chat_requires_mention_or_reply_to_bot():
 
     group_jid = "120363000123456789@g.us"
     config_store = AIChatConfigStore()
+    await config_store.set_enabled(group_jid, True)
     rate_guard = PerChatRateGuard(max_requests=10, window_seconds=60.0)
     settings = Settings(ai_bot_mention_name="Nara")
 

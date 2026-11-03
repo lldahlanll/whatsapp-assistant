@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import structlog
@@ -31,6 +32,7 @@ from whatsapp_platform.infrastructure.ai.interfaces import (
     ProviderMessage,
 )
 from whatsapp_platform.infrastructure.config.settings import Settings
+from whatsapp_platform.shared.utils.timezone import now_local
 
 if TYPE_CHECKING:
     from whatsapp_platform.infrastructure.ai.composite_executor import CompositeToolExecutor
@@ -65,6 +67,16 @@ def strip_emojis(text: str) -> str:
     return "\n".join(cleaned_lines).strip()
 
 
+def _current_date_note() -> str:
+    """Tanggal lokal hari ini, agar LLM bisa menghitung 'kemarin', '3 hari lalu', dst."""
+    today = now_local()
+    return (
+        f"Today is {today.strftime('%A')}, {today.strftime('%Y-%m-%d')} "
+        "(Asia/Jakarta time, WIB). Resolve relative dates such as 'hari ini', 'kemarin', "
+        "or '3 hari lalu' from this date."
+    )
+
+
 def _escape_role_spoof(text: str) -> str:
     return _ROLE_SPOOF_PATTERN.sub(lambda m: m.group(0).rstrip(":") + ":\u200b", text)
 
@@ -82,6 +94,11 @@ def _extract_image(msg: Message) -> ImagePart | None:
             mime_type=content.mime_type or AI_IMAGE_DEFAULT_MIME_TYPE,
         )
     return None
+
+
+def _as_utc(ts: datetime) -> datetime:
+    """Timestamp dari DB bisa naive (disimpan sebagai UTC)."""
+    return ts if ts.tzinfo else ts.replace(tzinfo=UTC)
 
 
 def _message_to_provider_role(msg: Message) -> ProviderMessage:
@@ -119,8 +136,12 @@ class AIReplyUseCase:
         chat_jid_str: str,
         trigger_message: Message,
         model_override: str | None = None,
+        history_since: datetime | None = None,
     ) -> AIResponse:
-        """Generate an AI reply for the trigger message in the given chat."""
+        """Generate an AI reply for the trigger message in the given chat.
+
+        history_since: pesan yang lebih lama dari waktu ini diabaikan (hasil !ai reset).
+        """
         image = _extract_image(trigger_message)
         if isinstance(trigger_message.content, TextContent):
             trigger_text = trigger_message.content.text
@@ -154,6 +175,8 @@ class AIReplyUseCase:
                 try:
                     recent = await self._get_conv_uc.execute(chat_jid_str, limit=2)
                     for prev_msg in recent:
+                        if history_since is not None and _as_utc(prev_msg.timestamp) <= history_since:
+                            continue
                         if prev_msg.direction == MessageDirection.OUTBOUND or prev_msg.is_from_me:
                             prev_txt = prev_msg.content.text if isinstance(prev_msg.content, TextContent) else ""
                             prev_low = prev_txt.lower()
@@ -186,6 +209,8 @@ class AIReplyUseCase:
                     chat_jid_str, limit=policy.history_limit
                 )
                 history = list(reversed(history))  # oldest → newest
+                if history_since is not None:
+                    history = [m for m in history if _as_utc(m.timestamp) > history_since]
             except Exception as exc:
                 logger.warning(
                     "Failed to fetch conversation history, proceeding without history",
@@ -206,7 +231,7 @@ class AIReplyUseCase:
         )
 
         messages: list[ProviderMessage] = [
-            ProviderMessage(role="system", content=policy.system_prompt),
+            ProviderMessage(role="system", content=f"{policy.system_prompt}\n\n{_current_date_note()}"),
         ]
 
         # Add DB history (excludes the trigger message which is appended below)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 import aiosqlite
@@ -56,6 +57,11 @@ class AISQLiteStore:
             CREATE INDEX IF NOT EXISTS idx_chat_context_chat_id ON chat_context (chat_id);
             """
         )
+        # Migrasi ringan untuk database lama yang belum punya kolom reset konteks
+        async with self._conn.execute("PRAGMA table_info(chat_config)") as cursor:
+            columns = {row["name"] for row in await cursor.fetchall()}
+        if "context_reset_at" not in columns:
+            await self._conn.execute("ALTER TABLE chat_config ADD COLUMN context_reset_at TEXT NULL")
         await self._conn.commit()
         logger.info("AISQLiteStore initialized", db_path=self.db_path)
 
@@ -74,7 +80,7 @@ class AISQLiteStore:
         if not self._conn:
             raise RuntimeError("AISQLiteStore not initialized")
         async with self._conn.execute(
-            "SELECT chat_id, ai_enabled, model, notice_sent FROM chat_config"
+            "SELECT chat_id, ai_enabled, model, notice_sent, context_reset_at FROM chat_config"
         ) as cursor:
             rows = await cursor.fetchall()
             result: dict[str, AIChatConfig] = {}
@@ -83,6 +89,9 @@ class AISQLiteStore:
                     enabled=bool(row["ai_enabled"]),
                     model=row["model"],
                     notice_sent=bool(row["notice_sent"]),
+                    context_reset_at=(
+                        datetime.fromisoformat(row["context_reset_at"]) if row["context_reset_at"] else None
+                    ),
                 )
             return result
 
@@ -91,17 +100,24 @@ class AISQLiteStore:
         if not self._conn:
             raise RuntimeError("AISQLiteStore not initialized")
         sql = """
-            INSERT INTO chat_config (chat_id, ai_enabled, model, notice_sent, updated_at)
-            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            INSERT INTO chat_config (chat_id, ai_enabled, model, notice_sent, context_reset_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(chat_id) DO UPDATE SET
                 ai_enabled=excluded.ai_enabled,
                 model=excluded.model,
                 notice_sent=excluded.notice_sent,
+                context_reset_at=excluded.context_reset_at,
                 updated_at=CURRENT_TIMESTAMP
         """
         await self._conn.execute(
             sql,
-            (chat_id, 1 if config.enabled else 0, config.model, 1 if config.notice_sent else 0),
+            (
+                chat_id,
+                1 if config.enabled else 0,
+                config.model,
+                1 if config.notice_sent else 0,
+                config.context_reset_at.isoformat() if config.context_reset_at else None,
+            ),
         )
         await self._conn.commit()
 

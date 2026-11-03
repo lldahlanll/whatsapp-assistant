@@ -254,7 +254,9 @@ class Container(IContainer):
             max_context_chars=self.settings.ai_max_context_chars,
         )
 
-        ai_config_store = AIChatConfigStore(db_store=ai_sqlite_store)
+        ai_config_store = AIChatConfigStore(
+            db_store=ai_sqlite_store, default_enabled=self.settings.ai_default_enabled
+        )
         await ai_config_store.initialize()
 
         ai_rate_guard = PerChatRateGuard(

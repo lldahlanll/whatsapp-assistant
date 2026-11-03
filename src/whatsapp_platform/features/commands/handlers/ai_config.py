@@ -1,10 +1,26 @@
 """AIChatCommandHandler for !ai commands (on, off, status, reset, model, stats)."""
 
+from typing import cast
+
+import structlog
+
+from whatsapp_platform.domain.entities.message import Message
 from whatsapp_platform.features.ai.config_store import AIChatConfigStore
 from whatsapp_platform.features.commands.base import BaseCommandHandler
 from whatsapp_platform.features.commands.context import CommandContext
 from whatsapp_platform.infrastructure.ai.ai_service import AIService
 from whatsapp_platform.infrastructure.ai.constants import ALL_SUPPORTED_MODELS, SUPPORTED_MODELS
+from whatsapp_platform.infrastructure.config.settings import Settings
+
+logger = structlog.get_logger()
+
+# Sub-command yang mengubah konfigurasi atau membuka data pemakaian: khusus admin.
+_ADMIN_SUBCOMMANDS = frozenset({"on", "off", "reset", "model", "stats"})
+
+_ADMIN_ONLY_TEXT = (
+    "⛔ Perintah ini khusus admin bot.\n"
+    "Admin diatur lewat `AI_ADMIN_JIDS` di file .env (nomor WhatsApp, pisahkan dengan koma)."
+)
 
 
 class AIChatCommandHandler(BaseCommandHandler):
@@ -19,9 +35,21 @@ class AIChatCommandHandler(BaseCommandHandler):
     - !ai stats         : Display daily LLM usage counters and key pool status
     """
 
-    def __init__(self, config_store: AIChatConfigStore, ai_service: AIService) -> None:
+    def __init__(
+        self, config_store: AIChatConfigStore, ai_service: AIService, settings: Settings | None = None
+    ) -> None:
         self._config_store = config_store
         self._ai_service = ai_service
+        self._admin_jids = set(cast(list[str], settings.ai_admin_jids)) if settings else set()
+        if not self._admin_jids:
+            logger.warning("AI_ADMIN_JIDS kosong: !ai on/off/reset/model/stats hanya bisa dari nomor bot sendiri")
+
+    def _is_admin(self, msg: Message) -> bool:
+        """Admin = nomor bot sendiri, atau pengirim yang terdaftar di AI_ADMIN_JIDS (nomor atau JID lengkap)."""
+        if msg.is_from_me:
+            return True
+        sender = msg.sender_jid
+        return str(sender) in self._admin_jids or sender.user in self._admin_jids
 
     @property
     def command_name(self) -> str:
@@ -50,6 +78,16 @@ class AIChatCommandHandler(BaseCommandHandler):
             return
 
         sub_command = args[0].lower()
+
+        if sub_command in _ADMIN_SUBCOMMANDS and not self._is_admin(ctx.message):
+            logger.info(
+                "Rejected non-admin !ai command",
+                sub_command=sub_command,
+                sender=str(ctx.message.sender_jid),
+                chat=chat_jid_str,
+            )
+            await ctx.reply(_ADMIN_ONLY_TEXT)
+            return
 
         if sub_command == "on":
             await self._handle_on(ctx, chat_jid_str)
@@ -117,11 +155,14 @@ class AIChatCommandHandler(BaseCommandHandler):
         await ctx.reply(text)
 
     async def _handle_reset(self, ctx: CommandContext, chat_jid: str) -> None:
-        # C7: !ai reset clears the LLM conversation context cache ONLY.
-        # This code explicitly clears the in-memory context window in AIService.
-        # It does NOT delete or alter any messages stored in the database.
+        # C7: !ai reset menandai waktu reset; AI mengabaikan history sebelum waktu ini.
+        # Pesan di database WhatsApp tidak dihapus.
+        await self._config_store.mark_context_reset(chat_jid)
         await self._ai_service.clear_context(chat_jid)
-        await ctx.reply("🧹 *Konteks Percakapan AI Di-reset*.\n(Pesan di database tetap tersimpan).")
+        await ctx.reply(
+            "🧹 *Konteks Percakapan AI Di-reset*.\n"
+            "Percakapan sebelumnya tidak lagi dipakai AI. (Pesan di database tetap tersimpan)."
+        )
 
     async def _handle_model(self, ctx: CommandContext, chat_jid: str, model_name: str) -> None:
         if not model_name:

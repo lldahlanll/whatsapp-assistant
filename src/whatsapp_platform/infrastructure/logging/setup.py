@@ -51,3 +51,6 @@ def setup_logging(log_level: str = "INFO", app_env: str = "development") -> None
         stream=sys.stdout,
         level=level,
     )
+    # httpx/httpcore mencatat setiap request (URL lengkap) di INFO; cukup tampilkan warning ke atas.
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)

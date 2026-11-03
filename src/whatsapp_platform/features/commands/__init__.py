@@ -67,7 +67,7 @@ class CommandsFeature(IFeatureModule):
         router.register(PromoteHandler())
         router.register(DemoteHandler())
         router.register(SetNameHandler())
-        router.register(AIChatCommandHandler(config_store, ai_service))
+        router.register(AIChatCommandHandler(config_store, ai_service, settings))
 
         from whatsapp_platform.features.commands.handlers.network import NetworkCommandHandler
         from whatsapp_platform.features.network.permission import NetworkPermissionChecker

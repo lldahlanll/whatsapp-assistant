@@ -93,6 +93,8 @@ async def _make_handler(
     ai_reply_uc.execute = AsyncMock(return_value=_ai_response())
     send_msg_uc = AsyncMock()
     gateway = AsyncMock()
+    # Identitas bot (nomor HP + LID) untuk deteksi mention di grup
+    gateway.get_own_user_ids = AsyncMock(return_value={"628999999999"})
     if isinstance(download_result, Exception):
         gateway.download_media = AsyncMock(side_effect=download_result)
     else:

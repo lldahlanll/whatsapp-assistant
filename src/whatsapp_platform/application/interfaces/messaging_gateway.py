@@ -71,6 +71,10 @@ class IMessagingGateway(ABC):
     async def set_group_name(self, group_jid: JID, name: str) -> None:
         """Set group subject/name."""
 
+    async def get_own_user_ids(self) -> set[str]:
+        """Bagian user JID milik bot sendiri (nomor HP dan LID). Kosong jika belum diketahui."""
+        return set()
+
     @abstractmethod
     async def leave_group(self, group_jid: JID) -> None:
         """Leave target WhatsApp group."""

@@ -71,6 +71,8 @@ class NeonizeGateway(IMessagingGateway):
         # Waktu saat bot mulai terhubung; pesan sebelum waktu ini adalah pesan
         # offline yang di-replay oleh WhatsApp dan harus diabaikan.
         self._startup_time: datetime | None = None
+        # Cache identitas bot (nomor HP + LID) untuk deteksi mention di grup.
+        self._own_user_ids: set[str] = set()
 
         self._register_neonize_event_handlers()
 
@@ -296,6 +298,22 @@ class NeonizeGateway(IMessagingGateway):
         except Exception as exc:
             logger.error("Failed to send text via Neonize", to=str(to), error=str(exc), exc_info=True)
             raise GatewayException(f"Failed to send message: {exc}") from exc
+
+    async def get_own_user_ids(self) -> set[str]:
+        if self._own_user_ids:
+            return self._own_user_ids
+        try:
+            device = await asyncio.to_thread(self.client.get_me)
+        except Exception as exc:
+            logger.warning("Failed to resolve own WhatsApp identity", error=str(exc))
+            return set()
+        ids = {
+            getattr(jid, "User", "")
+            for jid in (getattr(device, "JID", None), getattr(device, "LID", None))
+            if jid is not None
+        }
+        self._own_user_ids = {i for i in ids if i}
+        return self._own_user_ids
 
     async def send_chat_presence(self, to: JID, composing: bool) -> None:
         target_jid = build_jid(to.user, to.server)

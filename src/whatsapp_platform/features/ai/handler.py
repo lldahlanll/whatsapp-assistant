@@ -222,7 +222,7 @@ class AIMessageHandler:
 
         # Group chat guard: require bot @mention OR reply to bot message
         if msg.chat_jid.is_group:
-            is_mentioned = self._is_bot_mentioned(msg, text)
+            is_mentioned = await self._is_bot_mentioned(msg, text)
             is_reply = await self._is_reply_to_bot(msg)
             if not is_mentioned and not is_reply:
                 logger.debug(
@@ -262,6 +262,7 @@ class AIMessageHandler:
                     chat_jid_str=chat_jid_str,
                     trigger_message=trigger_msg,
                     model_override=config.model,
+                    history_since=config.context_reset_at,
                 )
             finally:
                 # 3. Typing OFF indicator (always executed in finally block)
@@ -401,16 +402,21 @@ class AIMessageHandler:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to send chat presence", chat=str(chat_jid), error=str(exc))
 
-    def _is_bot_mentioned(self, msg: Message, text: str) -> bool:
-        """Check if the bot was mentioned via JID metadata or text name."""
+    async def _is_bot_mentioned(self, msg: Message, text: str) -> bool:
+        """Check if the bot itself was mentioned via JID metadata or text name."""
         bot_name = self._settings.ai_bot_mention_name.strip().lower()
         if bot_name and f"@{bot_name}" in text.lower():
             return True
 
-        if msg.mentioned_jids:
-            return True
+        if not msg.mentioned_jids:
+            return False
 
-        return False
+        own_ids = await self._gateway.get_own_user_ids() if self._gateway else set()
+        if not own_ids:
+            # Identitas bot belum diketahui: jangan anggap mention orang lain sebagai mention bot.
+            logger.warning("Own WhatsApp identity unknown; ignoring JID mentions", chat=str(msg.chat_jid))
+            return False
+        return any(jid.user in own_ids for jid in msg.mentioned_jids)
 
     async def _is_reply_to_bot(self, msg: Message) -> bool:
         """Check if the message is replying to a previous message sent by the bot."""

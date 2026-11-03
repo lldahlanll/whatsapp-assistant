@@ -16,6 +16,10 @@ from whatsapp_platform.features.commands.handlers.ai_config import AIChatCommand
 from whatsapp_platform.infrastructure.ai.ai_service import AIService
 from whatsapp_platform.infrastructure.ai.key_pool import KeyPool
 from whatsapp_platform.infrastructure.ai.provider_strategy import FixedPriorityStrategy
+from whatsapp_platform.infrastructure.config.settings import Settings
+
+# Pengirim di _make_ctx terdaftar sebagai admin
+ADMIN_SETTINGS = Settings(ai_admin_jids="628123456789")
 
 
 def _make_ctx(text: str) -> CommandContext:
@@ -50,7 +54,7 @@ async def test_ai_command_on_sends_notice_first_time():
         providers={"gemini": (DummyProvider(), KeyPool(["k1"]))},
         strategy=FixedPriorityStrategy(["gemini"]),
     )
-    handler = AIChatCommandHandler(config_store, ai_service)
+    handler = AIChatCommandHandler(config_store, ai_service, ADMIN_SETTINGS)
 
     ctx = _make_ctx("!ai on")
     await handler.handle(ctx)
@@ -73,7 +77,7 @@ async def test_ai_command_on_second_time_no_duplicate_notice():
         providers={"gemini": (DummyProvider(), KeyPool(["k1"]))},
         strategy=FixedPriorityStrategy(["gemini"]),
     )
-    handler = AIChatCommandHandler(config_store, ai_service)
+    handler = AIChatCommandHandler(config_store, ai_service, ADMIN_SETTINGS)
 
     # Turn on 1st time
     await handler.handle(_make_ctx("!ai on"))
@@ -92,7 +96,7 @@ async def test_ai_command_off():
         providers={"gemini": (DummyProvider(), KeyPool(["k1"]))},
         strategy=FixedPriorityStrategy(["gemini"]),
     )
-    handler = AIChatCommandHandler(config_store, ai_service)
+    handler = AIChatCommandHandler(config_store, ai_service, ADMIN_SETTINGS)
 
     await config_store.set_enabled("628123456789@s.whatsapp.net", True)
     ctx = _make_ctx("!ai off")
@@ -113,7 +117,7 @@ async def test_ai_command_status():
         providers={"gemini": (DummyProvider(), KeyPool(["k1", "k2"]))},
         strategy=FixedPriorityStrategy(["gemini"]),
     )
-    handler = AIChatCommandHandler(config_store, ai_service)
+    handler = AIChatCommandHandler(config_store, ai_service, ADMIN_SETTINGS)
 
     ctx = _make_ctx("!ai status")
     await handler.handle(ctx)
@@ -136,7 +140,7 @@ async def test_ai_command_reset_clears_context_cache():
     await ai_service.append_to_context("628123456789@s.whatsapp.net", "user", "hello")
     assert len(await ai_service.get_context("628123456789@s.whatsapp.net")) == 1
 
-    handler = AIChatCommandHandler(config_store, ai_service)
+    handler = AIChatCommandHandler(config_store, ai_service, ADMIN_SETTINGS)
     ctx = _make_ctx("!ai reset")
     await handler.handle(ctx)
 
@@ -152,7 +156,7 @@ async def test_ai_command_model_whitelist_validation():
         providers={"gemini": (DummyProvider(), KeyPool(["k1"]))},
         strategy=FixedPriorityStrategy(["gemini"]),
     )
-    handler = AIChatCommandHandler(config_store, ai_service)
+    handler = AIChatCommandHandler(config_store, ai_service, ADMIN_SETTINGS)
 
     # Invalid model name
     ctx_invalid = _make_ctx("!ai model gpt-999-turbo-ultra")
@@ -178,7 +182,7 @@ async def test_ai_command_stats():
         strategy=FixedPriorityStrategy(["gemini"]),
     )
     await ai_service.usage_counter.increment("gemini")
-    handler = AIChatCommandHandler(config_store, ai_service)
+    handler = AIChatCommandHandler(config_store, ai_service, ADMIN_SETTINGS)
 
     ctx = _make_ctx("!ai stats")
     await handler.handle(ctx)

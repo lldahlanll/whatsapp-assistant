@@ -111,6 +111,14 @@ class Settings(BaseSettings):
     ai_max_context_chars: int = Field(
         default=16000, description="Max character budget for LLM context"
     )
+    ai_default_enabled: bool = Field(
+        default=False,
+        description="Aktifkan AI otomatis untuk chat baru. Default mati; nyalakan per chat lewat !ai on",
+    )
+    ai_admin_jids: list[str] | str = Field(
+        default_factory=list,
+        description="Nomor/JID yang boleh menjalankan !ai on/off/reset/model/stats (comma-separated)",
+    )
     ai_bot_mention_name: str = Field(
         default="", description="Bot display name for group chat @mention detection"
     )
@@ -166,6 +174,7 @@ class Settings(BaseSettings):
         "ninerouter_api_keys",
         "customer_lookup_allowed_groups",
         "network_allowed_jids",
+        "ai_admin_jids",
         mode="before",
     )
     @classmethod
