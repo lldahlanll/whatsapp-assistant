@@ -33,6 +33,7 @@ class MemoryToolExecutor:
         user_jid: JID,
         chat_jid: JID,
         message_id: str | None = None,
+        user_text: str | None = None,
     ) -> str:
         chat_id, user_id = str(chat_jid), str(user_jid)
         try:

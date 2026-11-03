@@ -8,8 +8,13 @@ services:
     restart: unless-stopped
     env_file:
       - .env.docker
+    environment:
+      # Di dalam container API harus bind 0.0.0.0 agar port mapping bekerja.
+      API_HOST: "0.0.0.0"
+      API_PORT: "8077"
     ports:
-      - "${API_PORT:-8077}:8077"
+      # Default hanya localhost VPS. Untuk akses dari luar, set API_BIND=0.0.0.0 dan taruh di belakang reverse proxy TLS.
+      - "${API_BIND:-127.0.0.1}:${API_PORT:-8077}:8077"
     volumes:
       # SQLite databases + WhatsApp session file (stored as /app/storage/<session>.db)
       - app_storage:/app/storage

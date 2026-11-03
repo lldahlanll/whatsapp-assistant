@@ -359,13 +359,33 @@ class AIService:
         intent: str = "chat",
         request_id: str = "",
         message_id: str | None = None,
+        user_text: str | None = None,
     ) -> AIResponse:
         """Generate a reply running an agentic tool calling loop with the executor.
 
         message_id: ID pesan WhatsApp pemicu; dipakai tool untuk idempotency & konfirmasi.
+        user_text: teks asli pesan user pemicu; dipakai tool untuk memverifikasi konfirmasi.
+        Hanya tool yang ditawarkan pada giliran ini (``tools``) yang boleh dieksekusi.
         """
         curr_messages = list(messages)
         iterations = 0
+        offered_tool_names = {t.name for t in tools}
+
+        async def run_tool(tc: Any) -> str:
+            if tc.name not in offered_tool_names:
+                logger.warning("Rejected tool call not offered this turn", chat=chat_jid, tool=tc.name)
+                return json.dumps({
+                    "status": "error",
+                    "error": f"Tool '{tc.name}' tidak tersedia untuk permintaan ini.",
+                })
+            return await tool_executor.execute(
+                tool_name=tc.name,
+                arguments=tc.arguments,
+                user_jid=user_jid,
+                chat_jid=wa_chat_jid,
+                message_id=message_id,
+                user_text=user_text,
+            )
 
         while iterations < max_tool_iterations:
             response = await self._call_provider_with_retry(
@@ -388,19 +408,18 @@ class AIService:
                 "LLM requested tool calls",
                 chat=chat_jid,
                 iteration=iterations + 1,
+                tool_calls=[{"name": tc.name, "arg_names": sorted(tc.arguments)} for tc in response.tool_calls],
+            )
+            logger.debug(
+                "LLM tool call arguments",
+                chat=chat_jid,
                 tool_calls=[{"name": tc.name, "args": tc.arguments} for tc in response.tool_calls],
             )
 
             # Check for fast-path confirmation template (avoiding 2nd LLM call for simple mutations)
             if len(response.tool_calls) == 1:
                 tc = response.tool_calls[0]
-                tool_output = await tool_executor.execute(
-                    tool_name=tc.name,
-                    arguments=tc.arguments,
-                    user_jid=user_jid,
-                    chat_jid=wa_chat_jid,
-                    message_id=message_id,
-                )
+                tool_output = await run_tool(tc)
                 is_group = bool(getattr(wa_chat_jid, "is_group", False))
                 fast_path_reply = try_finance_mutation_fast_path(tc.name, tool_output, is_group=is_group)
                 if fast_path_reply:
@@ -446,13 +465,7 @@ class AIService:
                     )
                 )
                 for tc in response.tool_calls:
-                    tool_output = await tool_executor.execute(
-                        tool_name=tc.name,
-                        arguments=tc.arguments,
-                        user_jid=user_jid,
-                        chat_jid=wa_chat_jid,
-                        message_id=message_id,
-                    )
+                    tool_output = await run_tool(tc)
                     compacted_output = compact_tool_result(tc.name, tool_output, max_chars=max_tool_result_chars)
                     curr_messages.append(
                         ProviderMessage(

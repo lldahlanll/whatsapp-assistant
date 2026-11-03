@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
+from contextvars import ContextVar
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
@@ -38,6 +40,37 @@ logger = structlog.get_logger()
 # Konfirmasi aksi destruktif harus datang dari pesan user berikutnya, bukan dari LLM di giliran yang sama.
 _CONFIRMATION_TTL_SECONDS = 300.0
 _TRUTHY = {"true", "1", "ya", "iya", "yes", "y"}
+
+
+_AFFIRMATIVE_WORDS = frozenset({
+    "ya", "iya", "iyaa", "y", "yes", "yup", "ok", "oke", "okay", "okey", "lanjut", "lanjutkan",
+    "yakin", "setuju", "benar", "betul", "hapus", "reset", "gas", "silakan", "silahkan",
+})
+_NEGATION_WORDS = frozenset({
+    "jangan", "tidak", "nggak", "ngga", "gak", "ga", "enggak", "bukan", "batal", "batalkan",
+    "cancel", "no", "tunggu", "stop", "belum", "tapi", "kenapa", "apa", "gimana", "bagaimana",
+})
+_MAX_AFFIRMATION_WORDS = 6
+
+# Teks pesan user yang sedang diproses; diisi oleh execute() agar konfirmasi bisa diverifikasi di server.
+_current_user_text: ContextVar[str | None] = ContextVar("finance_current_user_text", default=None)
+
+
+def is_affirmative(text: str | None) -> bool:
+    """True jika pesan user singkat dan jelas menyetujui ("ya", "iya hapus", "ok lanjut").
+
+    Fail closed: teks kosong/None, terlalu panjang, berisi penolakan atau pertanyaan -> False.
+    """
+    if not text:
+        return False
+    if "?" in text:
+        return False
+    words = re.findall(r"[a-z]+", text.lower())
+    if not words or len(words) > _MAX_AFFIRMATION_WORDS:
+        return False
+    if any(w in _NEGATION_WORDS for w in words):
+        return False
+    return words[0] in _AFFIRMATIVE_WORDS
 
 
 def _as_bool(value: Any) -> bool:
@@ -95,6 +128,8 @@ class FinanceToolExecutor:
 
         Panggilan pertama (atau confirm dari giliran yang sama) mendaftarkan permintaan
         konfirmasi dan mengembalikan False, sehingga LLM tidak bisa mengonfirmasi sendiri.
+        Selain flag dari LLM, teks pesan user itu sendiri harus berupa persetujuan eksplisit
+        (lihat ``is_affirmative``); flag ``confirm`` saja tidak cukup.
         """
         key = (owner_jid, action, target)
         now = time.monotonic()
@@ -105,6 +140,7 @@ class FinanceToolExecutor:
             and pending is not None
             and pending[0] != message_id
             and now - pending[1] <= _CONFIRMATION_TTL_SECONDS
+            and is_affirmative(_current_user_text.get())
         ):
             del self._pending_confirmations[key]
             return True
@@ -113,6 +149,21 @@ class FinanceToolExecutor:
         return False
 
     async def execute(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        user_jid: JID,
+        chat_jid: JID,
+        message_id: str | None = None,
+        user_text: str | None = None,
+    ) -> str:
+        token = _current_user_text.set(user_text)
+        try:
+            return await self._execute(tool_name, arguments, user_jid, chat_jid, message_id)
+        finally:
+            _current_user_text.reset(token)
+
+    async def _execute(
         self,
         tool_name: str,
         arguments: dict[str, Any],
@@ -130,10 +181,11 @@ class FinanceToolExecutor:
         logger.info(
             "Executing finance tool call",
             tool=tool_name,
-            arguments=arguments,
+            argument_names=sorted(arguments),
             owner=owner_jid,
             is_group=is_group,
         )
+        logger.debug("Finance tool call arguments", tool=tool_name, arguments=arguments)
 
         if is_group and tool_name in GROUP_BLOCKED_TOOLS:
             logger.info("Blocked finance tool in group chat", tool=tool_name, owner=owner_jid)

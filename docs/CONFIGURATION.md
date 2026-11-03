@@ -18,7 +18,7 @@ cp .env.example .env
 |---|---|---|
 | `APP_NAME` | `whatsapp-platform` | Nama aplikasi (untuk logging) |
 | `APP_ENV` | `development` | Environment: `development`, `staging`, `production` |
-| `DEBUG` | `true` | Aktifkan debug logging |
+| `DEBUG` | `false` | Aktifkan debug logging |
 | `LOG_LEVEL` | `INFO` | Level log: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` |
 | `COMMAND_PREFIX` | `!` | Prefix perintah bot (contoh: `!ping`) |
 
@@ -53,7 +53,10 @@ Database SQLite akan otomatis dibuat dan di-migrasi saat startup menggunakan Ale
 | Variable | Default | Deskripsi |
 |---|---|---|
 | `API_ENABLED` | `true` | Aktifkan REST API server |
-| `API_HOST` | `0.0.0.0` | Host bind API server |
+| `API_HOST` | `127.0.0.1` | Host bind API server (di Docker di-override ke `0.0.0.0` oleh compose) |
+| `API_DOCS_ENABLED` | `false` | Buka `/docs`, `/redoc`, `/openapi.json` |
+| `API_CORS_ORIGINS` | _(kosong)_ | Origin browser yang diizinkan (comma-separated). Kosong = CORS mati |
+| `API_BIND` | `127.0.0.1` | Hanya docker-compose: alamat host untuk publish port API |
 | `API_PORT` | `8077` | Port API server |
 | `API_KEY` | _(kosong)_ | Secret key untuk autentikasi `X-API-Key`. Kosong = semua endpoint `/api/v1/*` ditolak (503); `/health` tetap terbuka |
 

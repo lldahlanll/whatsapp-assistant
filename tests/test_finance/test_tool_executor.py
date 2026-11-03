@@ -261,6 +261,7 @@ async def test_tool_executor_delete_account_confirmed(
         user_jid=user_jid,
         chat_jid=chat_jid,
         message_id="msg-2",
+        user_text="ya",
     )
 
     data = json.loads(res_raw)

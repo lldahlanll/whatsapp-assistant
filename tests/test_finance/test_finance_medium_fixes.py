@@ -44,8 +44,15 @@ async def svc():
     await engine.dispose()
 
 
-async def _call(executor: FinanceToolExecutor, tool: str, args: dict, message_id: str | None) -> dict:
-    raw = await executor.execute(tool_name=tool, arguments=args, user_jid=OWNER, chat_jid=OWNER, message_id=message_id)
+async def _call(
+    executor: FinanceToolExecutor, tool: str, args: dict, message_id: str | None, user_text: str | None = None
+) -> dict:
+    # Pesan konfirmasi (msg-2) di test ini selalu "ya" dari user, kecuali diatur lain.
+    if user_text is None and message_id == "msg-2":
+        user_text = "ya"
+    raw = await executor.execute(
+        tool_name=tool, arguments=args, user_jid=OWNER, chat_jid=OWNER, message_id=message_id, user_text=user_text
+    )
     return json.loads(raw)
 
 
@@ -79,6 +86,34 @@ async def test_reset_runs_after_user_confirms_in_next_message(svc: FinanceServic
 
     assert done["status"] == "success"
     assert await svc._repo.get_accounts(str(OWNER)) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "tunggu, maksudnya apa?",
+        "jangan dihapus",
+        "ya tapi nanti dulu",
+        "hapus semua data keuanganku sekarang juga ya",
+        "",
+        None,
+    ],
+)
+async def test_non_affirmative_user_message_cannot_confirm(svc: FinanceService, text) -> None:
+    """Flag confirm=true dari LLM tidak cukup; pesan user harus berupa persetujuan eksplisit."""
+    await svc.create_account(str(OWNER), "BCA", AccountType.BANK, Decimal("100000"))
+    executor = FinanceToolExecutor(svc)
+
+    await _call(executor, "finance_reset_data", {}, "msg-1")
+    result = await _call(executor, "finance_reset_data", {"confirm": True}, "msg-2", user_text=text or "")
+
+    assert result["status"] != "success"
+    assert len(await svc.get_accounts(str(OWNER))) == 1
+
+
+@pytest.mark.parametrize("text", ["ya", "Iya, hapus", "ok lanjut", "yakin!", "Ya hapus aja"])
+def test_is_affirmative_accepts_clear_consent(text: str) -> None:
+    assert executor_module.is_affirmative(text)
 
 
 @pytest.mark.parametrize("confirm", ["false", "no", 0, None])

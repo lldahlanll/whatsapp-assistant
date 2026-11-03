@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     app_env: Literal["development", "staging", "production"] = Field(
         default="development", description="Execution environment"
     )
-    debug: bool = Field(default=True, description="Enable debug logging")
+    debug: bool = Field(default=False, description="Enable debug logging")
 
     session_name: str = Field(
         default="default_session", description="WhatsApp Session Identifier"
@@ -41,9 +41,19 @@ class Settings(BaseSettings):
 
     # REST API settings
     api_enabled: bool = Field(default=True, description="Enable REST API server")
-    api_host: str = Field(default="0.0.0.0", description="API server bind host")  # noqa: S104
+    api_host: str = Field(
+        default="127.0.0.1",
+        description="API server bind host (pakai 0.0.0.0 hanya di dalam container / di belakang reverse proxy)",
+    )
     api_port: int = Field(default=8000, description="API server port")
     api_key: str = Field(default="", description="API key for X-API-Key authentication (empty = disabled)")
+    api_docs_enabled: bool = Field(
+        default=False, description="Buka /docs, /redoc dan /openapi.json (jangan aktifkan di production)"
+    )
+    api_cors_origins: list[str] | str = Field(
+        default_factory=list,
+        description="Origin yang boleh akses API dari browser (comma-separated). Kosong = CORS mati",
+    )
 
     # AI Multi-Provider settings
     gemini_api_keys: list[str] | str = Field(
@@ -188,6 +198,7 @@ class Settings(BaseSettings):
         "ninerouter_api_keys",
         "network_allowed_jids",
         "ai_admin_jids",
+        "api_cors_origins",
         mode="before",
     )
     @classmethod

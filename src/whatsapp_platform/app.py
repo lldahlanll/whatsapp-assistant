@@ -69,7 +69,7 @@ class Application:
                 "🌐 REST API server starting",
                 host=self.settings.api_host,
                 port=self.settings.api_port,
-                docs=f"http://{self.settings.api_host}:{self.settings.api_port}/docs",
+                docs_enabled=self.settings.api_docs_enabled,
             )
 
         self._running = True

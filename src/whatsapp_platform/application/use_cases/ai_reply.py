@@ -280,6 +280,7 @@ class AIReplyUseCase:
                 intent=policy.intent,
                 request_id=request_id,
                 message_id=trigger_message.id,
+                user_text=trigger_text,
             )
         else:
             response = await self._ai_service.generate_reply(

@@ -169,5 +169,6 @@ Agar update aman tanpa downtime saat rollback, usahakan migrasi bersifat *additi
 
 - Gunakan password yang kuat untuk API Keys
 - Set `API_KEY` di `.env.docker`; tanpa itu endpoint `/api/v1/*` ditolak (503)
+- Port API di-publish hanya ke `127.0.0.1` secara default. Untuk akses dari luar set `API_BIND=0.0.0.0` di `.env` compose, dan taruh di belakang reverse proxy TLS (HTTP polos mengirim API key tanpa enkripsi)
 - Pertimbangkan firewall untuk membatasi akses port `8077` hanya dari IP tertentu
 - Rotate API keys secara berkala
