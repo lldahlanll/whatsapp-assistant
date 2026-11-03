@@ -42,6 +42,40 @@ def _head_revisions(project_root: Path) -> set[str]:
     return set(ScriptDirectory.from_config(config).get_heads())
 
 
+def _copy_sqlite(db_path: Path, dest: Path) -> None:
+    """Salin konsisten via SQLite backup API (aman saat DB sedang dipakai / mode WAL)."""
+    src = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    dst = sqlite3.connect(dest)
+    try:
+        src.backup(dst)
+    finally:
+        dst.close()
+        src.close()
+
+
+def snapshot_database(database_url: str, project_root: Path, reason: str, keep: int = 10) -> Path | None:
+    """Snapshot database sebelum operasi yang tidak bisa dibatalkan (mis. reset data).
+
+    Disimpan di ``<folder_db>/backups/snapshots/``. Mengembalikan path snapshot, atau None jika
+    database bukan file SQLite. Exception dilempar jika snapshot gagal agar operasi dibatalkan.
+    """
+    db_path = sqlite_path_from_url(database_url, project_root)
+    if db_path is None or not db_path.exists():
+        return None
+
+    snapshot_dir = db_path.parent / "backups" / "snapshots"
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    safe_reason = "".join(c if c.isalnum() or c in "-_" else "-" for c in reason) or "snapshot"
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    path = snapshot_dir / f"{db_path.stem}-{safe_reason}-{timestamp}.db"
+    _copy_sqlite(db_path, path)
+
+    snapshots = sorted(snapshot_dir.glob(f"{db_path.stem}-*.db"), key=lambda p: p.stat().st_mtime)
+    for old in snapshots[:-keep] if keep > 0 else []:
+        old.unlink()
+    return path
+
+
 def backup_before_migration(database_url: str, project_root: Path, keep: int = 5) -> Path | None:
     """Backup database jika masih ada migrasi tertunda. Mengembalikan path backup atau None."""
     db_path = sqlite_path_from_url(database_url, project_root)
@@ -58,13 +92,7 @@ def backup_before_migration(database_url: str, project_root: Path, keep: int = 5
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     backup_path = backup_dir / f"{db_path.stem}-{revision}-{timestamp}.db"
 
-    src = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    dst = sqlite3.connect(backup_path)
-    try:
-        src.backup(dst)
-    finally:
-        dst.close()
-        src.close()
+    _copy_sqlite(db_path, backup_path)
 
     # Simpan hanya `keep` backup terbaru untuk database ini.
     backups = sorted(backup_dir.glob(f"{db_path.stem}-*.db"), key=lambda p: p.stat().st_mtime)

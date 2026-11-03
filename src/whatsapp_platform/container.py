@@ -33,7 +33,10 @@ from whatsapp_platform.infrastructure.config.settings import Settings
 from whatsapp_platform.infrastructure.database.base import (
     create_engine_and_session_factory,
 )
-from whatsapp_platform.infrastructure.database.migration_backup import backup_before_migration
+from whatsapp_platform.infrastructure.database.migration_backup import (
+    backup_before_migration,
+    snapshot_database,
+)
 from whatsapp_platform.infrastructure.database.repositories.contact_repo import (
     SQLAlchemyContactRepository,
 )
@@ -251,7 +254,13 @@ class Container(IContainer):
         )
         from whatsapp_platform.infrastructure.finance.tool_executor import FinanceToolExecutor
 
-        finance_repo = SQLAlchemyFinanceRepository(session_factory)
+        project_root = Path(__file__).resolve().parents[2]
+        finance_repo = SQLAlchemyFinanceRepository(
+            session_factory,
+            pre_destructive_snapshot=lambda reason: snapshot_database(
+                self.settings.database_url, project_root, reason
+            ),
+        )
         finance_service = FinanceService(repo=finance_repo)
         finance_tool_executor = FinanceToolExecutor(finance_service=finance_service)
 

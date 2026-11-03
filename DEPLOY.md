@@ -148,6 +148,18 @@ docker compose run --rm --no-deps --entrypoint sh app -c 'cp /app/storage/backup
 ./scripts/deploy.sh --rollback
 ```
 
+> **Setelah restore**, hapus file pendamping WAL agar tidak tertimpa data lama:
+> `rm -f /app/storage/session.db-wal /app/storage/session.db-shm` (DB utama memakai mode WAL).
+
+#### Snapshot otomatis sebelum reset data finance
+
+Sebelum `reset` data finance dijalankan, aplikasi membuat snapshot di `storage/backups/snapshots/`
+(`session-pre-reset-<waktu>.db`, 10 terbaru disimpan). Jika snapshot gagal, reset dibatalkan.
+Untuk memulihkan, hentikan app lalu salin snapshot ke `storage/session.db` (dan hapus file `-wal`/`-shm`).
+
+> **Catatan WAL:** saat menyalin DB secara manual saat app berjalan, salin juga `session.db-wal`,
+> atau gunakan perintah backup SQLite (`sqlite3 session.db ".backup out.db"`).
+
 ### Aturan saat development (di local)
 
 Setiap kali mengubah model di `infrastructure/database/models.py`, buat file migrasi lalu commit bersama perubahan model:

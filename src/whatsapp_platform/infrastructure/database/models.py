@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, DateTime, Index, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Index, Integer, Numeric, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from whatsapp_platform.infrastructure.database.base import Base
@@ -86,6 +86,10 @@ class FinanceCategoryModel(Base):
     """Kategori pemasukan / pengeluaran."""
 
     __tablename__ = "finance_categories"
+    # Satu nama kategori per tipe per user; mencegah duplikat saat seed default berjalan bersamaan.
+    __table_args__ = (
+        Index("uq_finance_categories_owner_type_name", "owner_jid", "category_type", "name", unique=True),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     owner_jid: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
@@ -101,7 +105,17 @@ class FinanceTransactionModel(Base):
 
     __tablename__ = "finance_transactions"
     # Nama index mengikuti migrasi a1b2c3d4e5f6 agar `alembic check` tidak melihat perbedaan.
-    __table_args__ = (Index("ix_finance_transactions_date", "transaction_date"),)
+    __table_args__ = (
+        Index("ix_finance_transactions_date", "transaction_date"),
+        # Anti-dobel atomik: satu idempotency_key hanya boleh sekali per user.
+        Index(
+            "uq_finance_transactions_owner_idem",
+            "owner_jid",
+            "idempotency_key",
+            unique=True,
+            sqlite_where=text("idempotency_key IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     human_tx_id: Mapped[str | None] = mapped_column(String(30), nullable=True, index=True)

@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable
 from datetime import UTC, datetime
 from datetime import date as date_type
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from whatsapp_platform.domain.entities.finance import (
@@ -121,8 +125,14 @@ def _transaction_from_model(
 
 
 class SQLAlchemyFinanceRepository(IFinanceRepository):
-    def __init__(self, session_factory: Any) -> None:
+    def __init__(
+        self,
+        session_factory: Any,
+        pre_destructive_snapshot: Callable[[str], Path | None] | None = None,
+    ) -> None:
         self._session_factory = session_factory
+        # Dipanggil sebelum operasi yang tidak bisa dibatalkan (reset); gagal = operasi dibatalkan.
+        self._pre_destructive_snapshot = pre_destructive_snapshot
 
     def _session(self) -> AsyncSession:
         return self._session_factory()
@@ -211,9 +221,32 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
                 created_at=category.created_at,
             )
             session.add(model)
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError:
+                # Seed bersamaan: kategori yang sama sudah dibuat proses lain -> pakai yang ada.
+                await session.rollback()
+                existing = await self._get_category_exact(
+                    session, category.owner_jid, category.category_type.value, category.name
+                )
+                if existing is None:
+                    raise
+                return _category_from_model(existing)
             await session.refresh(model)
             return _category_from_model(model)
+
+    @staticmethod
+    async def _get_category_exact(
+        session: AsyncSession, owner_jid: str, category_type: str, name: str
+    ) -> FinanceCategoryModel | None:
+        result = await session.execute(
+            select(FinanceCategoryModel).where(
+                FinanceCategoryModel.owner_jid == owner_jid,
+                FinanceCategoryModel.category_type == category_type,
+                FinanceCategoryModel.name == name,
+            )
+        )
+        return result.scalars().first()
 
     async def get_categories(self, owner_jid: str) -> list[FinanceCategory]:
         async with self._session() as session:
@@ -233,8 +266,11 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
                     FinanceCategoryModel.owner_jid == owner_jid,
                     func.lower(FinanceCategoryModel.name) == name.lower(),
                 )
+                # Toleran terhadap duplikat lama: ambil yang paling awal, jangan error.
+                .order_by(FinanceCategoryModel.created_at, FinanceCategoryModel.id)
+                .limit(1)
             )
-            m = result.scalar_one_or_none()
+            m = result.scalars().first()
             return _category_from_model(m) if m else None
 
     # ── Transactions ──────────────────────────────────────────────────────────
@@ -265,6 +301,22 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
     async def save_transaction_atomic(
         self, transaction: FinanceTransaction, balance_deltas: dict[str, Decimal]
     ) -> FinanceTransaction:
+        try:
+            return await self._save_transaction_atomic(transaction, balance_deltas)
+        except IntegrityError:
+            # Pesan yang sama diproses bersamaan: unique index idempotency_key menolak yang kedua.
+            # Transaksi & perubahan saldo kedua sudah di-rollback; kembalikan yang pertama.
+            if transaction.idempotency_key:
+                existing = await self.get_transaction_by_idempotency_key(
+                    transaction.owner_jid, transaction.idempotency_key
+                )
+                if existing is not None:
+                    return existing
+            raise
+
+    async def _save_transaction_atomic(
+        self, transaction: FinanceTransaction, balance_deltas: dict[str, Decimal]
+    ) -> FinanceTransaction:
         async with self._session() as session:
             async with session.begin():
                 model = FinanceTransactionModel(
@@ -284,6 +336,7 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
                     created_at=transaction.created_at,
                 )
                 session.add(model)
+                await session.flush()  # INSERT lebih dulu: bentrok idempotency terdeteksi sebelum saldo berubah
                 await self._apply_balance_deltas(session, transaction.owner_jid, balance_deltas)
 
             await session.refresh(model)
@@ -308,6 +361,15 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
                         FinanceTransactionModel.owner_jid == owner_jid,
                         FinanceTransactionModel.is_reversed.is_(False),
                         FinanceTransactionModel.reversal_of_id.is_(None),
+                        # Data yang dipakai menghitung delta harus masih sama (bukan hasil edit bersamaan).
+                        FinanceTransactionModel.amount == reversal_tx.amount,
+                        FinanceTransactionModel.account_id == reversal_tx.account_id,
+                        (
+                            FinanceTransactionModel.transfer_to_account_id.is_(None)
+                            if reversal_tx.transfer_to_account_id is None
+                            else FinanceTransactionModel.transfer_to_account_id
+                            == reversal_tx.transfer_to_account_id
+                        ),
                     )
                     .values(is_reversed=True)
                 )
@@ -347,24 +409,43 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
     ) -> FinanceTransaction:
         async with self._session() as session:
             async with session.begin():
-                result = await session.execute(
-                    select(FinanceTransactionModel).where(
+                values: dict[str, Any] = {
+                    "amount": transaction.amount,
+                    "description": transaction.description,
+                    "category_id": transaction.category_id,
+                    "account_id": transaction.account_id,
+                    "transfer_to_account_id": transaction.transfer_to_account_id,
+                }
+                if transaction.transaction_date:
+                    values["transaction_date"] = transaction.transaction_date
+
+                # Conditional update: transaksi yang sudah di-reverse (atau baris reversal) tidak boleh diedit.
+                updated = await session.execute(
+                    update(FinanceTransactionModel)
+                    .where(
                         FinanceTransactionModel.id == transaction.id,
                         FinanceTransactionModel.owner_jid == transaction.owner_jid,
+                        FinanceTransactionModel.is_reversed.is_(False),
+                        FinanceTransactionModel.reversal_of_id.is_(None),
                     )
+                    .values(**values)
                 )
-                model = result.scalar_one_or_none()
-                if not model:
-                    raise ValueError(f"Transaction '{transaction.id}' not found for update.")
+                if updated.rowcount != 1:  # type: ignore[attr-defined]
+                    exists = await session.execute(
+                        select(FinanceTransactionModel.id).where(
+                            FinanceTransactionModel.id == transaction.id,
+                            FinanceTransactionModel.owner_jid == transaction.owner_jid,
+                        )
+                    )
+                    if exists.scalar_one_or_none() is None:
+                        raise ValueError(f"Transaction '{transaction.id}' not found for update.")
+                    raise FinanceTransactionConflictError(transaction.id)
 
-                model.amount = transaction.amount
-                model.description = transaction.description
-                model.category_id = transaction.category_id
-                model.account_id = transaction.account_id
-                model.transfer_to_account_id = transaction.transfer_to_account_id
-                if transaction.transaction_date:
-                    model.transaction_date = transaction.transaction_date
-
+                model = (
+                    await session.execute(
+                        select(FinanceTransactionModel).where(FinanceTransactionModel.id == transaction.id)
+                    )
+                ).scalar_one()
                 await self._apply_balance_deltas(session, transaction.owner_jid, balance_deltas)
 
             await session.refresh(model)
@@ -966,6 +1047,10 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
     async def reset_all_data(self, owner_jid: str) -> dict[str, int]:
         """Hapus semua data finance milik owner_jid dan return jumlah baris per tabel."""
         from sqlalchemy import delete as sa_delete
+
+        if self._pre_destructive_snapshot is not None:
+            # Gagal membuat snapshot = reset dibatalkan (data tidak boleh hilang tanpa cadangan).
+            await asyncio.to_thread(self._pre_destructive_snapshot, "pre-reset")
 
         async with self._session() as session:
             # Urutan penting: hapus dependant dulu sebelum parent
