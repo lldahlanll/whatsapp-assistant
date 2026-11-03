@@ -22,7 +22,6 @@ from whatsapp_platform.domain.value_objects.message_content import (
 )
 from whatsapp_platform.features.ai.config_store import AIChatConfigStore
 from whatsapp_platform.features.ai.rate_guard import PerChatRateGuard
-from whatsapp_platform.features.customer_lookup.phone_extractor import extract_phone_cores
 from whatsapp_platform.infrastructure.ai.constants import (
     AI_FALLBACK_BUSY_MESSAGE,
     AI_FALLBACK_ERROR_MESSAGE,
@@ -201,15 +200,6 @@ class AIMessageHandler:
         ):
             logger.debug(
                 "AI reply skipped: duplicate content fingerprint (Neonize multi-device quirk)",
-                message_id=msg.id,
-                chat=str(msg.chat_jid),
-            )
-            return
-
-        # Skip AI reply if message is a Customer Lookup query (contains phone numbers)
-        if extract_phone_cores(text):
-            logger.debug(
-                "AI reply skipped: message contains customer lookup phone core",
                 message_id=msg.id,
                 chat=str(msg.chat_jid),
             )

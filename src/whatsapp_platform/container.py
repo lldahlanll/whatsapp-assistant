@@ -270,40 +270,12 @@ class Container(IContainer):
         self.register(AIChatConfigStore, ai_config_store)
         self.register(PerChatRateGuard, ai_rate_guard)
 
-        from whatsapp_platform.features.customer_lookup import CustomerLookupFeature
-        from whatsapp_platform.features.customer_lookup.handler import CustomerLookupHandler
-        from whatsapp_platform.features.customer_lookup.rate_guard import PerSenderRateGuard
-        from whatsapp_platform.infrastructure.customer_lookup import (
-            CustomerLookupRepository,
-        )
-
-        customer_lookup_repo = CustomerLookupRepository(settings=self.settings)
-        customer_lookup_guard = PerSenderRateGuard()
-        customer_lookup_handler = CustomerLookupHandler(
-            repository=customer_lookup_repo,
-            send_msg_uc=send_msg_uc,
-            rate_guard=customer_lookup_guard,
-            settings=self.settings,
-        )
-        customer_lookup_feature = CustomerLookupFeature(handler=customer_lookup_handler)
-
-        self.register(CustomerLookupRepository, customer_lookup_repo)
-        self.register(PerSenderRateGuard, customer_lookup_guard)
-        self.register(CustomerLookupHandler, customer_lookup_handler)
-        self.register(CustomerLookupFeature, customer_lookup_feature)
-
         feature_registry = FeatureRegistry()
         self.register(FeatureRegistry, feature_registry)
 
     async def teardown(self) -> None:
-        """Cleanup resources allocated by container (HTTP client, SQLite, MySQL pool, MikroTik)."""
-        from whatsapp_platform.infrastructure.customer_lookup import close_pool
+        """Cleanup resources allocated by container (HTTP client, SQLite, MikroTik)."""
         from whatsapp_platform.infrastructure.mikrotik.client import MikroTikRestClient
-
-        try:
-            await close_pool()
-        except Exception as exc:
-            logger.warning("Error closing MySQL pool during teardown", error=str(exc))
 
         if MikroTikRestClient in self._services:
             mikrotik_client: MikroTikRestClient = self.resolve(MikroTikRestClient)

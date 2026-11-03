@@ -138,24 +138,6 @@ Untuk pengguna yang menjalankan LLM router sendiri (OpenAI-compatible):
 
 ---
 
-### 🔍 Customer Lookup (MySQL)
-
-Untuk lookup data pelanggan dari database MySQL eksternal.
-
-| Variable | Default | Deskripsi |
-|---|---|---|
-| `MYSQL_HOST` | _(kosong)_ | MySQL host. Kosong = fitur dinonaktifkan |
-| `MYSQL_PORT` | `3306` | MySQL port |
-| `MYSQL_USER` | _(kosong)_ | MySQL username |
-| `MYSQL_PASSWORD` | _(kosong)_ | MySQL password |
-| `MYSQL_DB` | _(kosong)_ | MySQL database name |
-| `MYSQL_POOL_MIN_SIZE` | `1` | Minimum pool size |
-| `MYSQL_POOL_MAX_SIZE` | `3` | Maximum pool size |
-| `MYSQL_QUERY_TIMEOUT_MS` | `3000` | Query timeout (milidetik) |
-| `CUSTOMER_LOOKUP_ALLOWED_GROUPS` | _(kosong)_ | Group JID yang diizinkan (comma-separated). Kosong = semua group diizinkan |
-
----
-
 ### 🌐 MikroTik Network Monitoring
 
 Integrasi dengan router MikroTik via REST API.
@@ -232,14 +214,6 @@ AI_RATE_LIMIT_WINDOW_SECONDS=60
 AI_BOT_MENTION_NAME="Nara"
 AI_HTTP_TIMEOUT_SECONDS=30
 
-# Customer Lookup MySQL
-MYSQL_HOST="127.0.0.1"
-MYSQL_PORT=3306
-MYSQL_USER="wa_user"
-MYSQL_PASSWORD="your-mysql-password"
-MYSQL_DB="customer_db"
-CUSTOMER_LOOKUP_ALLOWED_GROUPS="12036301234567890@g.us"
-
 # MikroTik
 MIKROTIK_ENABLED=true
 MIKROTIK_HOST="192.168.88.1"
@@ -257,7 +231,7 @@ COMMAND_PREFIX="!"
 ## ⚠️ Tips Keamanan
 
 1. **Jangan pernah** commit file `.env` atau `.env.docker` ke Git
-2. Gunakan **password yang kuat** untuk MySQL dan API keys
+2. Gunakan **password yang kuat** untuk API keys
 3. Set `API_KEY` untuk proteksi REST API
 4. Gunakan `NETWORK_ALLOWED_JIDS` untuk membatasi akses network commands
 5. Buat user **read-only** di MikroTik untuk integrasi bot

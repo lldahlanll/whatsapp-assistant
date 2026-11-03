@@ -136,19 +136,6 @@ class Settings(BaseSettings):
         default="./storage/ai_data.db", description="Path to AI persistence SQLite database"
     )
 
-    # Customer Lookup MySQL settings
-    mysql_host: str = Field(default="", description="MySQL Host")
-    mysql_port: int = Field(default=3306, description="MySQL Port")
-    mysql_user: str = Field(default="", description="MySQL User")
-    mysql_password: str = Field(default="", description="MySQL Password")
-    mysql_db: str = Field(default="", description="MySQL Database")
-    mysql_pool_min_size: int = Field(default=1, description="MySQL Pool minimum size")
-    mysql_pool_max_size: int = Field(default=3, description="MySQL Pool maximum size")
-    mysql_query_timeout_ms: int = Field(default=3000, description="MySQL query timeout in milliseconds")
-    customer_lookup_allowed_groups: list[str] | str = Field(
-        default_factory=list, description="Allowed WhatsApp group JIDs for Customer Lookup"
-    )
-
     # MikroTik REST API & Network AI settings
     mikrotik_enabled: bool = Field(default=False, description="Enable MikroTik integration")
     mikrotik_host: str = Field(default="", description="MikroTik Router IP or Hostname")
@@ -172,7 +159,6 @@ class Settings(BaseSettings):
         "groq_api_keys",
         "openrouter_api_keys",
         "ninerouter_api_keys",
-        "customer_lookup_allowed_groups",
         "network_allowed_jids",
         "ai_admin_jids",
         mode="before",

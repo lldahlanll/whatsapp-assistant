@@ -70,13 +70,6 @@ GEMINI_API_KEYS=["YOUR_REAL_KEY"]
 GROQ_API_KEYS=["YOUR_REAL_KEY"]
 OPENROUTER_API_KEYS=["YOUR_REAL_KEY"]
 
-# MySQL
-MYSQL_HOST="your-db-host"
-MYSQL_USER="your-user"
-MYSQL_PASSWORD="your-password"
-MYSQL_DB="your-database"
-MYSQL_ROOT_PASSWORD="your-root-password"
-
 # MikroTik (jika digunakan)
 MIKROTIK_HOST="your-router-ip"
 MIKROTIK_USERNAME="your-user"
@@ -174,7 +167,7 @@ Agar update aman tanpa downtime saat rollback, usahakan migrasi bersifat *additi
 > **JANGAN PERNAH** commit file `.env` atau `.env.docker` ke Git.  
 > Keduanya sudah masuk `.gitignore`.
 
-- Gunakan password yang kuat untuk MySQL dan API Keys
+- Gunakan password yang kuat untuk API Keys
 - Set `API_KEY` di `.env.docker` untuk proteksi REST API
 - Pertimbangkan firewall untuk membatasi akses port `8077` hanya dari IP tertentu
 - Rotate API keys secara berkala

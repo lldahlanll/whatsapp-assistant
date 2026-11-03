@@ -7,7 +7,7 @@
 [![Architecture: Clean](https://img.shields.io/badge/architecture-Clean%20%2B%20DDD-orange.svg)](docs/05_architecture_overview.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-Platform **WhatsApp Assistant** production-grade berbasis **Python 3.12+** dan **Neonize**. Dilengkapi **AI Assistant multi-provider**, **manajemen keuangan pribadi**, **monitoring jaringan MikroTik**, **customer lookup**, dan **REST API** — semuanya dibangun dengan prinsip **Clean Architecture** & **DDD**.
+Platform **WhatsApp Assistant** production-grade berbasis **Python 3.12+** dan **Neonize**. Dilengkapi **AI Assistant multi-provider**, **manajemen keuangan pribadi**, **monitoring jaringan MikroTik**, dan **REST API** — semuanya dibangun dengan prinsip **Clean Architecture** & **DDD**.
 
 ---
 
@@ -52,12 +52,6 @@ Platform **WhatsApp Assistant** production-grade berbasis **Python 3.12+** dan *
 - Generate invite link
 - Semua via perintah `!group`, `!kick`, `!add`, `!promote`, `!demote`, `!setname`, `!invitelink`
 
-### 🔍 Customer Lookup
-- Lookup data pelanggan dari database MySQL eksternal
-- Deteksi otomatis nomor telepon dalam pesan
-- Whitelist group yang diizinkan
-- Rate limiting per pengirim
-
 ### 🌐 REST API (FastAPI)
 - `GET /health` — Health check
 - `POST /api/messages/send` — Kirim pesan teks
@@ -92,9 +86,9 @@ Platform **WhatsApp Assistant** production-grade berbasis **Python 3.12+** dan *
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌───────────────────┐  │
 │  │ Session  │ │Messaging │ │ Commands │ │   AI Assistant    │  │
 │  └──────────┘ └──────────┘ └──────────┘ └───────────────────┘  │
-│  ┌──────────┐ ┌──────────────┐ ┌────────────────────────────┐  │
-│  │ Finance  │ │Customer Lookup│ │  Network (MikroTik)       │  │
-│  └──────────┘ └──────────────┘ └────────────────────────────┘  │
+│  ┌──────────┐ ┌────────────────────────────┐                    │
+│  │ Finance  │ │  Network (MikroTik)        │                    │
+│  └──────────┘ └────────────────────────────┘                    │
 ├──────────────────────────────────────────────────────────────────┤
 │                      APPLICATION LAYER                          │
 │       (Use Cases, Event Bus, Feature Registry, AI Reply)        │
@@ -104,7 +98,7 @@ Platform **WhatsApp Assistant** production-grade berbasis **Python 3.12+** dan *
 ├──────────────────────────────────────────────────────────────────┤
 │                     INFRASTRUCTURE LAYER                        │
 │  (Neonize Gateway, SQLAlchemy Repos, AI Providers, MikroTik,   │
-│   MySQL Client, Config, Structured Logging)                     │
+│   Config, Structured Logging)                                   │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -286,14 +280,12 @@ whatsapp-assistant/
 │   │   ├── commands/          # Command router & handlers
 │   │   ├── ai/                # AI auto-reply handler & config
 │   │   ├── finance/           # Personal finance service
-│   │   ├── customer_lookup/   # External MySQL customer lookup
 │   │   └── network/           # MikroTik network monitoring
 │   ├── infrastructure/
 │   │   ├── ai/                # AI providers (Gemini, Groq, OpenRouter, 9router)
 │   │   ├── neonize/           # WhatsApp gateway adapter
 │   │   ├── database/          # SQLAlchemy repos & Alembic migrations
 │   │   ├── mikrotik/          # MikroTik REST API client
-│   │   ├── customer_lookup/   # MySQL repository
 │   │   ├── finance/           # Finance tool schemas & executor
 │   │   ├── config/            # Pydantic Settings
 │   │   └── logging/           # Structured logging
@@ -335,7 +327,6 @@ whatsapp-assistant/
 - API key disimpan di `.env` (tidak di-commit ke git)
 - REST API dilindungi `X-API-Key` authentication
 - Network commands menggunakan JID whitelist
-- Customer lookup dibatasi per group
 - AI rate limiting per-chat untuk mencegah abuse
 - Per-chat privacy notice saat AI diaktifkan
 
