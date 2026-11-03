@@ -7,7 +7,7 @@ import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import TYPE_CHECKING
 
 import structlog
@@ -87,6 +87,26 @@ class ReversalTransactionError(FinanceServiceError):
             "dan tidak bisa diubah, dihapus, atau dibatalkan lagi."
         )
 
+
+
+# Saldo disimpan sebagai REAL di SQLite (presisi ~15 digit). Batasi nominal & pembulatan agar tetap eksak.
+MAX_AMOUNT = Decimal("1000000000000")  # 1 triliun
+_CENTS = Decimal("0.01")
+
+
+def _normalize_amount(amount: Decimal, too_small_message: str) -> Decimal:
+    """Bulatkan ke 2 desimal; tolak nominal <= 0, bukan angka, atau di atas batas."""
+    try:
+        if not amount.is_finite():
+            raise InvalidAmountError("Jumlah tidak valid.")
+        normalized = amount.quantize(_CENTS, rounding=ROUND_HALF_UP)
+    except (ArithmeticError, AttributeError) as exc:
+        raise InvalidAmountError("Jumlah tidak valid.") from exc
+    if normalized <= 0:
+        raise InvalidAmountError(too_small_message)
+    if normalized > MAX_AMOUNT:
+        raise InvalidAmountError("Jumlah terlalu besar (maksimal Rp 1.000.000.000.000).")
+    return normalized
 
 
 @contextmanager
@@ -300,8 +320,7 @@ class FinanceService:
         date: datetime | None = None,
         idempotency_key: str | None = None,
     ) -> FinanceTransaction:
-        if amount <= 0:
-            raise InvalidAmountError("Jumlah pemasukan harus lebih dari 0.")
+        amount = _normalize_amount(amount, "Jumlah pemasukan harus lebih dari 0.")
 
         if idempotency_key:
             existing = await self._repo.get_transaction_by_idempotency_key(owner_jid, idempotency_key)
@@ -357,8 +376,7 @@ class FinanceService:
         date: datetime | None = None,
         idempotency_key: str | None = None,
     ) -> FinanceTransaction:
-        if amount <= 0:
-            raise InvalidAmountError("Jumlah pengeluaran harus lebih dari 0.")
+        amount = _normalize_amount(amount, "Jumlah pengeluaran harus lebih dari 0.")
 
         if idempotency_key:
             existing = await self._repo.get_transaction_by_idempotency_key(owner_jid, idempotency_key)
@@ -421,8 +439,7 @@ class FinanceService:
         date: datetime | None = None,
         idempotency_key: str | None = None,
     ) -> FinanceTransaction:
-        if amount <= 0:
-            raise InvalidAmountError("Jumlah transfer harus lebih dari 0.")
+        amount = _normalize_amount(amount, "Jumlah transfer harus lebih dari 0.")
 
         if idempotency_key:
             existing = await self._repo.get_transaction_by_idempotency_key(owner_jid, idempotency_key)
@@ -561,8 +578,7 @@ class FinanceService:
         new_account_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> FinanceTransaction:
-        if new_amount <= 0:
-            raise InvalidAmountError("Jumlah transaksi harus lebih dari 0.")
+        new_amount = _normalize_amount(new_amount, "Jumlah transaksi harus lebih dari 0.")
 
         orig_tx = await self._repo.get_transaction_by_id(original_tx_id, owner_jid)
         if not orig_tx:
@@ -805,7 +821,7 @@ class FinanceService:
             raise ReversalTransactionError(tx)
         success = await self._repo.delete_transaction(tx.id, owner_jid)
         if success:
-            logger.info("Transaction hard-deleted", owner=owner_jid, tx_id=tx.id)
+            logger.info("Transaction soft-deleted", owner=owner_jid, tx_id=tx.id)
         return success
 
     async def get_expense_summary(

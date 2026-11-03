@@ -53,6 +53,7 @@ Database SQLite akan otomatis dibuat dan di-migrasi saat startup menggunakan Ale
 | Variable | Default | Deskripsi |
 |---|---|---|
 | `API_ENABLED` | `true` | Aktifkan REST API server |
+| `AI_RATE_LIMIT_PER_USER_MAX_REQUESTS` | `3` | Batas request AI per pengirim di grup per window (0 = nonaktif) |
 | `API_HOST` | `127.0.0.1` | Host bind API server (di Docker di-override ke `0.0.0.0` oleh compose) |
 | `API_DOCS_ENABLED` | `false` | Buka `/docs`, `/redoc`, `/openapi.json` |
 | `API_CORS_ORIGINS` | _(kosong)_ | Origin browser yang diizinkan (comma-separated). Kosong = CORS mati |

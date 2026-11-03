@@ -249,7 +249,10 @@ class AIMessageHandler:
             quoted_target = None
 
         # Per-chat rate guard
-        allowed = await self._rate_guard.check_and_record(chat_jid_str)
+        # Di grup, batas per pengirim juga berlaku agar satu anggota tidak menghabiskan kuota grup.
+        allowed = await self._rate_guard.check_and_record(
+            chat_jid_str, sender=str(msg.sender_jid) if msg.chat_jid.is_group else None
+        )
         if not allowed:
             logger.warning(
                 "AI request rate limit exceeded for chat",

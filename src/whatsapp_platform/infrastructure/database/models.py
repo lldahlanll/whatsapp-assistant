@@ -132,6 +132,8 @@ class FinanceTransactionModel(Base):
     transfer_to_account_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     is_reversed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     reversal_of_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # Soft delete: baris tetap ada sebagai jejak audit (is_reversed=True juga di-set agar laporan mengabaikannya).
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
 
 

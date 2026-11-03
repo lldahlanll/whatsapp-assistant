@@ -61,6 +61,9 @@ class Application:
 
         await feature_registry.initialize_all(self.container)
 
+        for warning in self.settings.mikrotik_security_warnings():
+            logger.warning("MikroTik config berisiko", detail=warning, env=self.settings.app_env)
+
         if self.settings.api_enabled:
             if not self.settings.api_key:
                 logger.warning("API_KEY kosong: endpoint /api/v1/* menolak semua request (503) sampai diisi")

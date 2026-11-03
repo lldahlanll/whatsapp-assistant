@@ -40,6 +40,9 @@ COPY --from=builder /app/src /app/src
 COPY alembic/ ./alembic/
 COPY alembic.ini ./
 
+# Skrip operasional baca-saja (rekonsiliasi data finance)
+COPY scripts/reconcile_finance.py ./scripts/reconcile_finance.py
+
 # Storage and logs directories (will be mounted as volumes)
 RUN mkdir -p /app/storage /app/logs
 

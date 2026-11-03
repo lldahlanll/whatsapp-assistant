@@ -160,6 +160,17 @@ Untuk memulihkan, hentikan app lalu salin snapshot ke `storage/session.db` (dan 
 > **Catatan WAL:** saat menyalin DB secara manual saat app berjalan, salin juga `session.db-wal`,
 > atau gunakan perintah backup SQLite (`sqlite3 session.db ".backup out.db"`).
 
+#### Pengecekan konsistensi data finance
+
+Skrip baca-saja untuk memeriksa saldo vs transaksi, saldo minus, referensi yatim, serta kategori/idempotency_key ganda:
+
+```bash
+docker compose run --rm --no-deps --entrypoint python app scripts/reconcile_finance.py /app/storage/session.db
+```
+
+Exit code 0 = bersih, 1 = ada temuan. Jalankan sebelum dan sesudah deploy yang menyentuh skema finance.
+(Pastikan folder `scripts/` ikut di image, atau jalankan dari host terhadap salinan DB.)
+
 ### Aturan saat development (di local)
 
 Setiap kali mengubah model di `infrastructure/database/models.py`, buat file migrasi lalu commit bersama perubahan model:

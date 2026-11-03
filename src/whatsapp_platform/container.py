@@ -307,6 +307,7 @@ class Container(IContainer):
         ai_rate_guard = PerChatRateGuard(
             max_requests=self.settings.ai_rate_limit_max_requests,
             window_seconds=self.settings.ai_rate_limit_window_seconds,
+            per_user_max_requests=self.settings.ai_rate_limit_per_user_max_requests,
         )
 
         self.register(AISQLiteStore, ai_sqlite_store)

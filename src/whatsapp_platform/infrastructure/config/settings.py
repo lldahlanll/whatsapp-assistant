@@ -94,6 +94,9 @@ class Settings(BaseSettings):
     ai_rate_limit_max_requests: int = Field(
         default=5, description="Max AI requests per minute per chat"
     )
+    ai_rate_limit_per_user_max_requests: int = Field(
+        default=3, description="Max AI requests per window per pengirim di grup (0 = nonaktif)"
+    )
     ai_rate_limit_window_seconds: float = Field(
         default=60.0, description="Per-chat rate guard window in seconds"
     )
@@ -210,6 +213,23 @@ class Settings(BaseSettings):
                 return []
             return [k.strip() for k in value.split(",") if k.strip()]
         return value
+
+    def mikrotik_security_warnings(self) -> list[str]:
+        """Peringatan konfigurasi MikroTik yang berisiko (kredensial router lewat jaringan)."""
+        if not (self.mikrotik_enabled and self.mikrotik_host):
+            return []
+        warnings: list[str] = []
+        if not self.mikrotik_use_ssl:
+            warnings.append(
+                "MIKROTIK_USE_SSL=false: kredensial router dikirim cleartext (HTTP Basic Auth). "
+                "Aktifkan www-ssl di RouterOS dan set MIKROTIK_USE_SSL=true."
+            )
+        elif not self.mikrotik_verify_ssl:
+            warnings.append(
+                "MIKROTIK_VERIFY_SSL=false: sertifikat router tidak diverifikasi (rentan MITM). "
+                "Pasang sertifikat valid/CA sendiri lalu set MIKROTIK_VERIFY_SSL=true."
+            )
+        return warnings
 
     @field_validator("mikrotik_enabled", mode="before")
     @classmethod

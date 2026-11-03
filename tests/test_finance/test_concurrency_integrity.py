@@ -155,3 +155,93 @@ async def test_reset_is_aborted_when_snapshot_fails(env) -> None:
         await second_engine.dispose()
 
     assert len(await svc.get_accounts(OWNER)) == 1
+
+
+# ── Soft delete ──────────────────────────────────────────────────────────────
+
+
+async def test_delete_transaction_keeps_row_for_audit_and_restores_balance(env) -> None:
+    svc, _, engine, _ = env
+    acc = await svc.create_account(OWNER, "BCA", AccountType.BANK, Decimal("100000"))
+    tx = await svc.add_expense(OWNER, Decimal("10000"), "kopi", account_id=acc.id)
+
+    assert await svc.delete_transaction(OWNER, tx.id) is True
+
+    assert (await svc.get_accounts(OWNER))[0].balance == Decimal("100000")
+    assert await svc.get_recent_transactions(OWNER, limit=20) == []
+    async with engine.connect() as conn:
+        query = text("SELECT deleted_at, is_reversed FROM finance_transactions WHERE id = :i")
+        row = (await conn.execute(query, {"i": tx.id})).one()
+    assert row.deleted_at is not None and row.is_reversed
+
+
+async def test_deleted_transaction_cannot_be_deleted_or_found_again(env) -> None:
+    from whatsapp_platform.features.finance.service import TransactionNotFoundError
+
+    svc, _, _, _ = env
+    acc = await svc.create_account(OWNER, "BCA", AccountType.BANK, Decimal("100000"))
+    tx = await svc.add_expense(OWNER, Decimal("10000"), "kopi", account_id=acc.id)
+    await svc.delete_transaction(OWNER, tx.id)
+
+    with pytest.raises(TransactionNotFoundError):
+        await svc.delete_transaction(OWNER, tx.id)
+    assert (await svc.get_accounts(OWNER))[0].balance == Decimal("100000")
+
+
+async def test_concurrent_deletes_restore_balance_only_once(env) -> None:
+    svc, repo, _, _ = env
+    acc = await svc.create_account(OWNER, "BCA", AccountType.BANK, Decimal("100000"))
+    tx = await svc.add_expense(OWNER, Decimal("10000"), "kopi", account_id=acc.id)
+
+    results = await asyncio.gather(*[repo.delete_transaction(tx.id, OWNER) for _ in range(4)])
+
+    assert sorted(results) == [False, False, False, True]
+    assert (await svc.get_accounts(OWNER))[0].balance == Decimal("100000")
+
+
+# ── Nominal & presisi ────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("bad", [Decimal("0"), Decimal("-5"), Decimal("NaN"), Decimal("Infinity"), Decimal("1E+13")])
+async def test_invalid_amounts_are_rejected(env, bad: Decimal) -> None:
+    from whatsapp_platform.features.finance.service import InvalidAmountError
+
+    svc, _, _, _ = env
+    acc = await svc.create_account(OWNER, "BCA", AccountType.BANK, Decimal("100000"))
+    with pytest.raises(InvalidAmountError):
+        await svc.add_expense(OWNER, bad, "x", account_id=acc.id)
+
+
+async def test_amount_is_rounded_to_two_decimals(env) -> None:
+    svc, _, _, _ = env
+    acc = await svc.create_account(OWNER, "BCA", AccountType.BANK, Decimal("100"))
+    tx = await svc.add_expense(OWNER, Decimal("10.005"), "x", account_id=acc.id)
+    assert tx.amount == Decimal("10.01")
+
+
+async def test_float_drift_does_not_reject_spending_exact_balance(env) -> None:
+    svc, _, _, _ = env
+    acc = await svc.create_account(OWNER, "Kas", AccountType.CASH, Decimal("0"))
+    for _ in range(8):
+        await svc.add_income(OWNER, Decimal("0.10"), "x", account_id=acc.id)
+
+    # 8 x 0.1 = 0.7999999999999999 sebagai float; pengeluaran 0.80 harus tetap lolos.
+    await svc.add_expense(OWNER, Decimal("0.80"), "x", account_id=acc.id)
+    assert (await svc.get_accounts(OWNER))[0].balance == Decimal("0.00")
+
+
+def test_expired_pending_confirmations_are_pruned(monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import MagicMock
+
+    from whatsapp_platform.infrastructure.finance import tool_executor as mod
+
+    executor = mod.FinanceToolExecutor(MagicMock())
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock["t"])
+    executor._confirmed_by_user("a", "reset_data", "all", "m1", False)
+    assert len(executor._pending_confirmations) == 1
+
+    clock["t"] += mod._CONFIRMATION_TTL_SECONDS + 1
+    executor._confirmed_by_user("b", "reset_data", "all", "m2", False)
+
+    assert list(executor._pending_confirmations) == [("b", "reset_data", "all")]

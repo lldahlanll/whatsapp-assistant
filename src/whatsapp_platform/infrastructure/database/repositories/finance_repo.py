@@ -463,6 +463,7 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
                 select(FinanceTransactionModel).where(
                     (FinanceTransactionModel.id == tx_id) | (FinanceTransactionModel.human_tx_id == tx_id),
                     FinanceTransactionModel.owner_jid == owner_jid,
+                    FinanceTransactionModel.deleted_at.is_(None),
                 )
             )
             m = result.scalar_one_or_none()
@@ -634,7 +635,7 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
         tx_id: str,
         owner_jid: str,
     ) -> bool:
-        """Hard delete transaksi dan kembalikan saldo ke kondisi sebelumnya."""
+        """Soft delete transaksi (baris tetap ada, ditandai deleted_at) dan kembalikan saldo."""
         async with self._session() as session:
             async with session.begin():
                 result = await session.execute(
@@ -643,10 +644,25 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
                         | (FinanceTransactionModel.human_tx_id == tx_id),
                         FinanceTransactionModel.owner_jid == owner_jid,
                         FinanceTransactionModel.is_reversed.is_(False),
+                        FinanceTransactionModel.reversal_of_id.is_(None),
+                        FinanceTransactionModel.deleted_at.is_(None),
                     )
                 )
                 tx_m = result.scalar_one_or_none()
                 if not tx_m:
+                    return False
+
+                # Conditional update lebih dulu: dua penghapusan bersamaan hanya satu yang mengubah saldo.
+                marked = await session.execute(
+                    update(FinanceTransactionModel)
+                    .where(
+                        FinanceTransactionModel.id == tx_m.id,
+                        FinanceTransactionModel.is_reversed.is_(False),
+                        FinanceTransactionModel.deleted_at.is_(None),
+                    )
+                    .values(is_reversed=True, deleted_at=datetime.now(UTC))
+                )
+                if marked.rowcount != 1:  # type: ignore[attr-defined]
                     return False
 
                 # Kembalikan saldo akun
@@ -666,8 +682,6 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
                         deltas[tx_m.transfer_to_account_id] = -amount
                 # Hapus transaksi memang boleh membuat saldo minus (perilaku lama dipertahankan).
                 await self._apply_balance_deltas(session, owner_jid, deltas, allow_negative=True)
-
-                await session.delete(tx_m)
         return True
 
     async def get_transactions_by_period(
@@ -824,7 +838,8 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
                 # Backstop atomik: rekening nonaktif tidak boleh bertransaksi lagi.
                 stmt = stmt.where(FinanceAccountModel.is_active.is_(True))
                 if delta < 0:
-                    stmt = stmt.where(FinanceAccountModel.balance + delta >= 0)
+                    # round(): saldo disimpan sebagai REAL di SQLite; hindari penolakan salah akibat error float.
+                    stmt = stmt.where(func.round(FinanceAccountModel.balance + delta, 2) >= 0)
             result = await session.execute(stmt)
             if result.rowcount != 1:
                 raise FinanceBalanceConflictError(acc_id)

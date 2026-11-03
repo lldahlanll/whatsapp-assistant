@@ -133,6 +133,10 @@ class FinanceToolExecutor:
         """
         key = (owner_jid, action, target)
         now = time.monotonic()
+        # Buang permintaan konfirmasi kedaluwarsa agar dict tidak tumbuh tanpa batas.
+        expired = [k for k, (_, ts) in self._pending_confirmations.items() if now - ts > _CONFIRMATION_TTL_SECONDS]
+        for k in expired:
+            del self._pending_confirmations[k]
         pending = self._pending_confirmations.get(key)
         if (
             _as_bool(confirm)
