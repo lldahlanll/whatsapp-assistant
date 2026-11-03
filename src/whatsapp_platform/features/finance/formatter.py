@@ -13,6 +13,7 @@ from whatsapp_platform.domain.entities.finance import (
     MonthlySummary,
     TransactionType,
 )
+from whatsapp_platform.shared.utils.timezone import to_local
 
 
 def _fmt(amount: Decimal) -> str:
@@ -101,7 +102,7 @@ def format_transaction_added(tx: FinanceTransaction) -> str:
     if tx.description:
         lines.append(f"Catatan: {tx.description}")
 
-    tanggal = tx.transaction_date.strftime("%d %b %Y")
+    tanggal = format_tx_date(tx.transaction_date, include_year=True)
     lines += ["━━━━━━━━━━━━━━━━━━", f"Tanggal: {tanggal}"]
     return "\n".join(lines)
 
@@ -116,6 +117,8 @@ def format_tx_date(val: datetime | date | str | None, include_year: bool = False
     """Format tanggal ke format Indonesia ringkas, misal '14 Sep'."""
     if not val:
         return ""
+    if isinstance(val, datetime):
+        val = to_local(val)
     if hasattr(val, "day") and hasattr(val, "month"):
         day = val.day
         month = val.month

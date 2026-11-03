@@ -25,6 +25,23 @@ from whatsapp_platform.features.finance.parser import (
 from whatsapp_platform.features.finance.service import (
     FinanceService,
     FinanceServiceError,
+    InsufficientBalanceError,
+)
+from whatsapp_platform.shared.utils.timezone import now_local
+
+_INCOME_SUBCOMMANDS = ("masuk", "income", "pemasukan", "in", "tambah", "topup", "top-up")
+_EXPENSE_SUBCOMMANDS = ("keluar", "expense", "pengeluaran", "out")
+_TRANSFER_SUBCOMMANDS = ("transfer", "tf", "trf")
+
+# Di grup hanya pencatatan yang diizinkan (balasannya tidak memuat saldo),
+# selaras dengan GROUP_BLOCKED_TOOLS di jalur AI.
+_GROUP_ALLOWED_SUBCOMMANDS = frozenset(
+    _INCOME_SUBCOMMANDS + _EXPENSE_SUBCOMMANDS + _TRANSFER_SUBCOMMANDS
+)
+
+_GROUP_PRIVATE_ONLY_TEXT = (
+    "Data keuangan pribadi hanya bisa dilihat dan dikelola lewat chat pribadi.\n"
+    "Di grup kamu hanya bisa mencatat transaksi (`masuk`, `keluar`, `transfer`)."
 )
 
 _HELP_TEXT = (
@@ -101,18 +118,23 @@ class FinanceCommandHandler(BaseCommandHandler):
 
         sub = args[0].lower()
         rest = args[1:]
+        is_group = ctx.message.chat_jid.is_group
+
+        if is_group and sub not in _GROUP_ALLOWED_SUBCOMMANDS:
+            await ctx.reply(_GROUP_PRIVATE_ONLY_TEXT)
+            return
 
         try:
             if sub in ("saldo", "balance", "kas"):
                 await self._handle_balance(ctx, owner_jid)
 
-            elif sub in ("masuk", "income", "pemasukan", "in", "tambah", "topup", "top-up"):
+            elif sub in _INCOME_SUBCOMMANDS:
                 await self._handle_income(ctx, owner_jid, rest)
 
-            elif sub in ("keluar", "expense", "pengeluaran", "out"):
+            elif sub in _EXPENSE_SUBCOMMANDS:
                 await self._handle_expense(ctx, owner_jid, rest)
 
-            elif sub in ("transfer", "tf", "trf"):
+            elif sub in _TRANSFER_SUBCOMMANDS:
                 await self._handle_transfer(ctx, owner_jid, rest)
 
             elif sub in ("riwayat", "history", "transaksi", "tx"):
@@ -139,6 +161,13 @@ class FinanceCommandHandler(BaseCommandHandler):
                     "Ketik `!finance help` untuk melihat panduan penggunaan."
                 )
 
+        except InsufficientBalanceError as exc:
+            # Pesan asli memuat nominal saldo; jangan bocorkan di grup.
+            await ctx.reply(
+                "Saldo rekening tidak mencukupi. Cek detail saldo lewat chat pribadi."
+                if is_group
+                else format_finance_error(exc)
+            )
         except FinanceServiceError as exc:
             await ctx.reply(format_finance_error(exc))
         except Exception as exc:
@@ -478,8 +507,7 @@ class FinanceCommandHandler(BaseCommandHandler):
     async def _handle_budget(
         self, ctx: CommandContext, owner_jid: str, rest: list[str]
     ) -> None:
-        from datetime import UTC, datetime
-        now = datetime.now(UTC)
+        now = now_local()
 
         # 1. List budgets: "!finance budget" or "!finance budget list" or "!finance budget semua"
         if not rest or rest[0].lower() in ("list", "daftar", "semua"):

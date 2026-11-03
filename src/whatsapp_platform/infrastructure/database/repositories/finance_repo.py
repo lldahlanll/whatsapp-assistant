@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from datetime import date as date_type
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from whatsapp_platform.domain.entities.finance import (
@@ -21,6 +22,10 @@ from whatsapp_platform.domain.entities.finance import (
     MonthlySummary,
     TransactionType,
 )
+from whatsapp_platform.domain.exceptions import (
+    FinanceBalanceConflictError,
+    FinanceTransactionConflictError,
+)
 from whatsapp_platform.domain.repositories.finance_repository import IFinanceRepository
 from whatsapp_platform.infrastructure.database.models import (
     FinanceAccountModel,
@@ -28,6 +33,7 @@ from whatsapp_platform.infrastructure.database.models import (
     FinanceCategoryModel,
     FinanceTransactionModel,
 )
+from whatsapp_platform.shared.utils.timezone import day_bounds_utc, month_bounds_utc
 
 
 def _calculate_budget_status(percentage: float) -> str:
@@ -255,7 +261,7 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
             return _transaction_from_model(model)
 
     async def save_transaction_atomic(
-        self, transaction: FinanceTransaction, balance_updates: dict[str, Decimal]
+        self, transaction: FinanceTransaction, balance_deltas: dict[str, Decimal]
     ) -> FinanceTransaction:
         async with self._session() as session:
             async with session.begin():
@@ -276,13 +282,7 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
                     created_at=transaction.created_at,
                 )
                 session.add(model)
-                for acc_id, new_bal in balance_updates.items():
-                    acc_result = await session.execute(
-                        select(FinanceAccountModel).where(FinanceAccountModel.id == acc_id)
-                    )
-                    acc_m = acc_result.scalar_one_or_none()
-                    if acc_m:
-                        acc_m.balance = new_bal
+                await self._apply_balance_deltas(session, transaction.owner_jid, balance_deltas)
 
             await session.refresh(model)
             return _transaction_from_model(
@@ -294,19 +294,22 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
             )
 
     async def reverse_transaction_atomic(
-        self, original_tx_id: str, owner_jid: str, reversal_tx: FinanceTransaction, balance_updates: dict[str, Decimal]
+        self, original_tx_id: str, owner_jid: str, reversal_tx: FinanceTransaction, balance_deltas: dict[str, Decimal]
     ) -> FinanceTransaction:
         async with self._session() as session:
             async with session.begin():
+                # Conditional update: dua reversal bersamaan hanya satu yang lolos.
                 orig_result = await session.execute(
-                    select(FinanceTransactionModel).where(
+                    update(FinanceTransactionModel)
+                    .where(
                         FinanceTransactionModel.id == original_tx_id,
                         FinanceTransactionModel.owner_jid == owner_jid,
+                        FinanceTransactionModel.is_reversed.is_(False),
                     )
+                    .values(is_reversed=True)
                 )
-                orig_m = orig_result.scalar_one_or_none()
-                if orig_m:
-                    orig_m.is_reversed = True
+                if orig_result.rowcount != 1:
+                    raise FinanceTransactionConflictError(original_tx_id)
 
                 rev_model = FinanceTransactionModel(
                     id=reversal_tx.id,
@@ -325,13 +328,7 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
                     created_at=reversal_tx.created_at,
                 )
                 session.add(rev_model)
-                for acc_id, new_bal in balance_updates.items():
-                    acc_result = await session.execute(
-                        select(FinanceAccountModel).where(FinanceAccountModel.id == acc_id)
-                    )
-                    acc_m = acc_result.scalar_one_or_none()
-                    if acc_m:
-                        acc_m.balance = new_bal
+                await self._apply_balance_deltas(session, owner_jid, balance_deltas)
 
             await session.refresh(rev_model)
             return _transaction_from_model(
@@ -343,14 +340,13 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
             )
 
     async def update_transaction_atomic(
-        self, transaction: FinanceTransaction, balance_updates: dict[str, Decimal]
+        self, transaction: FinanceTransaction, balance_deltas: dict[str, Decimal]
     ) -> FinanceTransaction:
         async with self._session() as session:
             async with session.begin():
                 result = await session.execute(
                     select(FinanceTransactionModel).where(
-                        (FinanceTransactionModel.id == transaction.id)
-                        | (FinanceTransactionModel.human_tx_id == transaction.human_tx_id),
+                        FinanceTransactionModel.id == transaction.id,
                         FinanceTransactionModel.owner_jid == transaction.owner_jid,
                     )
                 )
@@ -366,13 +362,7 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
                 if transaction.transaction_date:
                     model.transaction_date = transaction.transaction_date
 
-                for acc_id, new_bal in balance_updates.items():
-                    acc_result = await session.execute(
-                        select(FinanceAccountModel).where(FinanceAccountModel.id == acc_id)
-                    )
-                    acc_m = acc_result.scalar_one_or_none()
-                    if acc_m:
-                        acc_m.balance = new_bal
+                await self._apply_balance_deltas(session, transaction.owner_jid, balance_deltas)
 
             await session.refresh(model)
             return _transaction_from_model(
@@ -500,7 +490,7 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
         self,
         owner_jid: str,
         keyword: str | None = None,
-        date: datetime | None = None,
+        date: date_type | datetime | None = None,
         transaction_type: str | None = None,
         limit: int = 5,
     ) -> list[FinanceTransaction]:
@@ -522,12 +512,12 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
                     )
                 )
             if date:
-                # Match same calendar day
-                day_start = date.replace(hour=0, minute=0, second=0, microsecond=0)
-                day_end = date.replace(hour=23, minute=59, second=59, microsecond=999999)
+                # Match same local calendar day
+                day = date.date() if isinstance(date, datetime) else date
+                day_start, day_end = day_bounds_utc(day)
                 q = q.where(
                     FinanceTransactionModel.transaction_date >= day_start,
-                    FinanceTransactionModel.transaction_date <= day_end,
+                    FinanceTransactionModel.transaction_date < day_end,
                 )
             if transaction_type:
                 q = q.where(FinanceTransactionModel.transaction_type == transaction_type)
@@ -576,33 +566,22 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
                     return False
 
                 # Kembalikan saldo akun
-                acc_result = await session.execute(
-                    select(FinanceAccountModel).where(
-                        FinanceAccountModel.id == tx_m.account_id
-                    )
-                )
-                acc = acc_result.scalar_one_or_none()
-                if acc:
-                    tx_type = tx_m.transaction_type
-                    amount = Decimal(str(tx_m.amount))
-                    if tx_type == TransactionType.INCOME.value:
-                        # Batalkan income: kurangi saldo
-                        acc.balance = acc.balance - amount
-                    elif tx_type == TransactionType.EXPENSE.value:
-                        # Batalkan expense: tambah saldo
-                        acc.balance = acc.balance + amount
-                    elif tx_type == TransactionType.TRANSFER.value:
-                        # Batalkan transfer: kembalikan saldo from, kurangi saldo to
-                        acc.balance = acc.balance + amount
-                        if tx_m.transfer_to_account_id:
-                            to_result = await session.execute(
-                                select(FinanceAccountModel).where(
-                                    FinanceAccountModel.id == tx_m.transfer_to_account_id
-                                )
-                            )
-                            to_acc = to_result.scalar_one_or_none()
-                            if to_acc:
-                                to_acc.balance = to_acc.balance - amount
+                tx_type = tx_m.transaction_type
+                amount = Decimal(str(tx_m.amount))
+                deltas: dict[str, Decimal] = {}
+                if tx_type == TransactionType.INCOME.value:
+                    # Batalkan income: kurangi saldo
+                    deltas[tx_m.account_id] = -amount
+                elif tx_type == TransactionType.EXPENSE.value:
+                    # Batalkan expense: tambah saldo
+                    deltas[tx_m.account_id] = amount
+                elif tx_type == TransactionType.TRANSFER.value:
+                    # Batalkan transfer: kembalikan saldo from, kurangi saldo to
+                    deltas[tx_m.account_id] = amount
+                    if tx_m.transfer_to_account_id:
+                        deltas[tx_m.transfer_to_account_id] = -amount
+                # Hapus transaksi memang boleh membuat saldo minus (perilaku lama dipertahankan).
+                await self._apply_balance_deltas(session, owner_jid, deltas, allow_negative=True)
 
                 await session.delete(tx_m)
         return True
@@ -652,11 +631,7 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
         self, owner_jid: str, year: int, month: int
     ) -> MonthlySummary:
 
-        start = datetime(year, month, 1, tzinfo=UTC)
-        if month == 12:
-            end = datetime(year + 1, 1, 1, tzinfo=UTC)
-        else:
-            end = datetime(year, month + 1, 1, tzinfo=UTC)
+        start, end = month_bounds_utc(year, month)
 
         async with self._session() as session:
             result = await session.execute(
@@ -737,6 +712,35 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
         return summaries
 
     # ── Internal helpers ──────────────────────────────────────────────────────
+
+    async def _apply_balance_deltas(
+        self,
+        session: AsyncSession,
+        owner_jid: str,
+        balance_deltas: dict[str, Decimal],
+        allow_negative: bool = False,
+    ) -> None:
+        """Terapkan perubahan saldo relatif (balance = balance + delta) dalam transaksi aktif.
+
+        Update relatif di level SQL mencegah lost update ketika dua pesan memproses
+        rekening yang sama bersamaan. Delta negatif ditolak jika membuat saldo minus.
+        """
+        for acc_id, delta in balance_deltas.items():
+            if delta == 0:
+                continue
+            stmt = (
+                update(FinanceAccountModel)
+                .where(
+                    FinanceAccountModel.id == acc_id,
+                    FinanceAccountModel.owner_jid == owner_jid,
+                )
+                .values(balance=FinanceAccountModel.balance + delta)
+            )
+            if delta < 0 and not allow_negative:
+                stmt = stmt.where(FinanceAccountModel.balance + delta >= 0)
+            result = await session.execute(stmt)
+            if result.rowcount != 1:
+                raise FinanceBalanceConflictError(acc_id)
 
     async def _fetch_accounts_by_ids(
         self, session: AsyncSession, ids: set[str]
@@ -875,11 +879,7 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
         if not budget:
             return None
 
-        start = datetime(year, month, 1, tzinfo=UTC)
-        if month == 12:
-            end = datetime(year + 1, 1, 1, tzinfo=UTC)
-        else:
-            end = datetime(year, month + 1, 1, tzinfo=UTC)
+        start, end = month_bounds_utc(year, month)
 
         async with self._session() as session:
             result = await session.execute(
@@ -915,11 +915,7 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
         if not budgets:
             return []
 
-        start = datetime(year, month, 1, tzinfo=UTC)
-        if month == 12:
-            end = datetime(year + 1, 1, 1, tzinfo=UTC)
-        else:
-            end = datetime(year, month + 1, 1, tzinfo=UTC)
+        start, end = month_bounds_utc(year, month)
 
         cat_ids = [b.category_id for b in budgets]
         async with self._session() as session:

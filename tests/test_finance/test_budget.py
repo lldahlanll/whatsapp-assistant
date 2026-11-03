@@ -519,6 +519,7 @@ async def test_command_handler_budget_flow(async_session_factory, owner_jid: str
         ctx = MagicMock(spec=CommandContext)
         ctx.message = MagicMock()
         ctx.message.sender_jid = owner_jid
+        ctx.message.chat_jid.is_group = False
         ctx.command = MagicMock()
         ctx.command.name = "finance"
         ctx.command.args = args

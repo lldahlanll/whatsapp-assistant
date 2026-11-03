@@ -165,7 +165,8 @@ async def test_tool_executor_expense_with_custom_date(
         amount=Decimal("50000"),
         category_id=None,
         description="Makan malam kemarin",
-        transaction_date=datetime(2026, 8, 23, 19, 0, tzinfo=UTC),
+        # 19:00 WIB tanggal 23 = 12:00 UTC
+        transaction_date=datetime(2026, 8, 23, 12, 0, tzinfo=UTC),
         transfer_to_account_id=None,
         created_at=datetime.now(UTC),
         account_name="BCA",
@@ -188,7 +189,8 @@ async def test_tool_executor_expense_with_custom_date(
     assert data["status"] == "success"
     assert data["date"] == "2026-08-23"
     mock_service.add_expense.assert_called_once()
-    assert mock_service.add_expense.call_args[1]["date"] == datetime(2026, 8, 23, 0, 0, tzinfo=UTC)
+    # Tanggal dari LLM = tengah malam WIB, disimpan sebagai UTC
+    assert mock_service.add_expense.call_args.kwargs["date"] == datetime(2026, 8, 22, 17, 0, tzinfo=UTC)
 
 
 @pytest.mark.asyncio

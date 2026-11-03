@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
@@ -19,6 +21,10 @@ from whatsapp_platform.domain.entities.finance import (
     MonthlySummary,
     TransactionType,
 )
+from whatsapp_platform.domain.exceptions import (
+    FinanceBalanceConflictError,
+    FinanceTransactionConflictError,
+)
 from whatsapp_platform.features.finance.default_categories import (
     ALL_DEFAULT_CATEGORIES,
     EXPENSE_KEYWORD_MAP,
@@ -27,6 +33,7 @@ from whatsapp_platform.features.finance.default_categories import (
 from whatsapp_platform.features.finance.parser import (
     guess_category_from_text,
 )
+from whatsapp_platform.shared.utils.timezone import month_bounds_utc, now_local
 
 if TYPE_CHECKING:
     from whatsapp_platform.domain.repositories.finance_repository import IFinanceRepository
@@ -71,8 +78,21 @@ class BudgetNotFoundError(FinanceServiceError):
 
 
 
+@contextmanager
+def _translate_conflicts() -> Iterator[None]:
+    """Ubah konflik dari repository (cek atomik di DB) menjadi error yang ramah user."""
+    try:
+        yield
+    except FinanceBalanceConflictError as exc:
+        raise InsufficientBalanceError(
+            "Saldo rekening tidak mencukupi (saldo berubah saat diproses). Cek saldo lalu coba lagi."
+        ) from exc
+    except FinanceTransactionConflictError as exc:
+        raise TransactionAlreadyReversedError("Transaksi sudah pernah di-reverse.") from exc
+
+
 def _generate_human_tx_id() -> str:
-    now = datetime.now(UTC)
+    now = now_local()
     return f"TXN-{now.strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
 
 
@@ -286,8 +306,8 @@ class FinanceService:
             category_icon=category.icon if category else None,
         )
 
-        new_balance = account.balance + amount
-        saved_tx = await self._repo.save_transaction_atomic(tx, {account.id: new_balance})
+        with _translate_conflicts():
+            saved_tx = await self._repo.save_transaction_atomic(tx, {account.id: amount})
         if saved_tx.account_name is None:
             saved_tx.account_name = account.name
         if saved_tx.category_name is None and category:
@@ -350,8 +370,8 @@ class FinanceService:
             category_icon=category.icon if category else None,
         )
 
-        new_balance = account.balance - amount
-        saved_tx = await self._repo.save_transaction_atomic(tx, {account.id: new_balance})
+        with _translate_conflicts():
+            saved_tx = await self._repo.save_transaction_atomic(tx, {account.id: -amount})
         if saved_tx.account_name is None:
             saved_tx.account_name = account.name
         if saved_tx.category_name is None and category:
@@ -416,11 +436,9 @@ class FinanceService:
             transfer_to_account_name=to_acc.name,
         )
 
-        balance_updates = {
-            from_acc.id: from_acc.balance - amount,
-            to_acc.id: to_acc.balance + amount,
-        }
-        saved_tx = await self._repo.save_transaction_atomic(tx, balance_updates)
+        balance_deltas = {from_acc.id: -amount, to_acc.id: amount}
+        with _translate_conflicts():
+            saved_tx = await self._repo.save_transaction_atomic(tx, balance_deltas)
         if saved_tx.account_name is None:
             saved_tx.account_name = from_acc.name
         if saved_tx.transfer_to_account_name is None:
@@ -453,15 +471,15 @@ class FinanceService:
         if not from_acc:
             raise AccountNotFoundError("Rekening transaksi tidak ditemukan.")
 
-        balance_updates: dict[str, Decimal] = {}
+        balance_deltas: dict[str, Decimal] = {}
         if orig_tx.transaction_type == TransactionType.INCOME:
             if from_acc.balance < orig_tx.amount:
                 raise InsufficientBalanceError(
                     f"Saldo {from_acc.name} ({from_acc.balance:,.0f}) tidak mencukupi untuk reversal pemasukan."
                 )
-            balance_updates[from_acc.id] = from_acc.balance - orig_tx.amount
+            balance_deltas[from_acc.id] = -orig_tx.amount
         elif orig_tx.transaction_type == TransactionType.EXPENSE:
-            balance_updates[from_acc.id] = from_acc.balance + orig_tx.amount
+            balance_deltas[from_acc.id] = orig_tx.amount
         elif orig_tx.transaction_type == TransactionType.TRANSFER:
             if not orig_tx.transfer_to_account_id:
                 raise FinanceServiceError("Transaksi transfer tidak memiliki rekening tujuan.")
@@ -472,8 +490,8 @@ class FinanceService:
                 raise InsufficientBalanceError(
                     f"Saldo {to_acc.name} ({to_acc.balance:,.0f}) tidak mencukupi untuk membatalkan transfer."
                 )
-            balance_updates[from_acc.id] = from_acc.balance + orig_tx.amount
-            balance_updates[to_acc.id] = to_acc.balance - orig_tx.amount
+            balance_deltas[from_acc.id] = orig_tx.amount
+            balance_deltas[to_acc.id] = -orig_tx.amount
 
         rev_tx = FinanceTransaction(
             id=str(uuid.uuid4()),
@@ -492,12 +510,13 @@ class FinanceService:
             created_at=datetime.now(UTC),
         )
 
-        saved_rev = await self._repo.reverse_transaction_atomic(
-            original_tx_id=orig_tx.id,
-            owner_jid=owner_jid,
-            reversal_tx=rev_tx,
-            balance_updates=balance_updates,
-        )
+        with _translate_conflicts():
+            saved_rev = await self._repo.reverse_transaction_atomic(
+                original_tx_id=orig_tx.id,
+                owner_jid=owner_jid,
+                reversal_tx=rev_tx,
+                balance_deltas=balance_deltas,
+            )
         logger.info("Transaction reversed atomically", owner=owner_jid, orig_id=orig_tx.id)
         return saved_rev
 
@@ -554,7 +573,9 @@ class FinanceService:
                 target_category_name = cat.name
                 target_category_icon = cat.icon
 
-        # 3. Calculate Balance Updates
+        # 3. Validate against current balances (early, friendly errors). The repository
+        #    re-checks atomically; balance_updates here are absolute targets that we
+        #    convert to deltas below.
         balance_updates: dict[str, Decimal] = {}
         old_amount = orig_tx.amount
 
@@ -661,10 +682,17 @@ class FinanceService:
             transfer_to_account_name=orig_tx.transfer_to_account_name,
         )
 
-        saved = await self._repo.update_transaction_atomic(
-            transaction=updated_tx,
-            balance_updates=balance_updates,
-        )
+        current_balances = {orig_acc.id: orig_acc.balance, target_acc.id: target_acc.balance}
+        if orig_tx.transaction_type == TransactionType.TRANSFER:
+            current_balances[to_acc.id] = to_acc.balance
+        balance_deltas = {
+            acc_id: target - current_balances[acc_id] for acc_id, target in balance_updates.items()
+        }
+        with _translate_conflicts():
+            saved = await self._repo.update_transaction_atomic(
+                transaction=updated_tx,
+                balance_deltas=balance_deltas,
+            )
         logger.info(
             "Transaction updated atomically",
             owner=owner_jid,
@@ -682,7 +710,7 @@ class FinanceService:
     async def get_monthly_report(
         self, owner_jid: str, year: int | None = None, month: int | None = None
     ) -> MonthlySummary:
-        now = datetime.now(UTC)
+        now = now_local()
         return await self._repo.get_monthly_summary(
             owner_jid,
             year=year or now.year,
@@ -748,16 +776,8 @@ class FinanceService:
     async def get_expense_summary(
         self, owner_jid: str, year: int | None = None, month: int | None = None
     ) -> list:
-        from datetime import datetime as dt
-
-        now = dt.now(UTC)
-        y = year or now.year
-        m = month or now.month
-        start = datetime(y, m, 1, tzinfo=UTC)
-        if m == 12:
-            end = datetime(y + 1, 1, 1, tzinfo=UTC)
-        else:
-            end = datetime(y, m + 1, 1, tzinfo=UTC)
+        now = now_local()
+        start, end = month_bounds_utc(year or now.year, month or now.month)
 
         return await self._repo.get_category_summary(owner_jid, start, end)
 
@@ -800,7 +820,7 @@ class FinanceService:
         if amount <= 0:
             raise InvalidAmountError("Jumlah budget harus lebih dari 0.")
 
-        now = datetime.now(UTC)
+        now = now_local()
         m = month if month is not None else now.month
         y = year if year is not None else now.year
 
@@ -843,7 +863,7 @@ class FinanceService:
         month: int | None = None,
         year: int | None = None,
     ) -> BudgetProgress | None:
-        now = datetime.now(UTC)
+        now = now_local()
         m = month if month is not None else now.month
         y = year if year is not None else now.year
 
@@ -862,7 +882,7 @@ class FinanceService:
         year: int | None = None,
     ) -> list[BudgetProgress]:
         await self.ensure_defaults(owner_jid)
-        now = datetime.now(UTC)
+        now = now_local()
         m = month if month is not None else now.month
         y = year if year is not None else now.year
 
@@ -880,7 +900,7 @@ class FinanceService:
         month: int | None = None,
         year: int | None = None,
     ) -> bool:
-        now = datetime.now(UTC)
+        now = now_local()
         m = month if month is not None else now.month
         y = year if year is not None else now.year
 
@@ -903,7 +923,7 @@ class FinanceService:
     async def get_reset_preview(self, owner_jid: str) -> dict[str, int]:
         """Return hitungan data finance yang akan dihapus tanpa menghapusnya."""
         accounts = await self._repo.get_accounts(owner_jid)
-        now = datetime.now(UTC)
+        now = now_local()
         transactions = await self._repo.get_transactions(owner_jid, limit=9999)
         budgets = await self._repo.get_budgets(owner_jid, now.month, now.year)
         categories = await self._repo.get_categories(owner_jid)

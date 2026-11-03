@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
@@ -17,6 +17,13 @@ from whatsapp_platform.features.finance.service import (
     InsufficientBalanceError,
     InvalidAmountError,
     TransactionNotFoundError,
+)
+from whatsapp_platform.shared.utils.timezone import (
+    day_bounds_utc,
+    now_local,
+    parse_local_date,
+    parse_local_datetime,
+    to_local,
 )
 
 if TYPE_CHECKING:
@@ -180,7 +187,12 @@ class FinanceToolExecutor:
             return json.dumps({
                 "status": "error",
                 "error_code": "INSUFFICIENT_BALANCE",
-                "message": str(exc),
+                # Pesan asli memuat nominal saldo; jangan bocorkan di grup.
+                "message": (
+                    "Saldo rekening tidak mencukupi. Cek detail saldo lewat chat pribadi."
+                    if is_group
+                    else str(exc)
+                ),
             }, ensure_ascii=False)
         except InvalidAmountError as exc:
             return json.dumps({
@@ -218,12 +230,13 @@ class FinanceToolExecutor:
 
     @staticmethod
     def _parse_tx_date(val: str | None) -> datetime | None:
-        if not val:
+        """Tanggal dari LLM dalam waktu lokal. Hari ini → None agar memakai jam sekarang."""
+        dt = parse_local_datetime(val)
+        if dt is None:
             return None
-        try:
-            return datetime.fromisoformat(val).replace(tzinfo=UTC)
-        except (ValueError, TypeError):
+        if "T" not in val and to_local(dt).date() == now_local().date():
             return None
+        return dt
 
     async def _add_income(self, owner_jid: str, args: dict) -> str:
         amount = Decimal(str(args["amount"]))
@@ -249,9 +262,9 @@ class FinanceToolExecutor:
         )
         current_acc = await self._svc._repo.get_account_by_id(tx.account_id, owner_jid)
         date_str = (
-            tx.transaction_date.strftime("%Y-%m-%d")
+            to_local(tx.transaction_date).strftime("%Y-%m-%d")
             if tx.transaction_date
-            else datetime.now(UTC).strftime("%Y-%m-%d")
+            else now_local().strftime("%Y-%m-%d")
         )
         return json.dumps({
             "status": "success",
@@ -293,9 +306,9 @@ class FinanceToolExecutor:
         )
         current_acc = await self._svc._repo.get_account_by_id(tx.account_id, owner_jid)
         date_str = (
-            tx.transaction_date.strftime("%Y-%m-%d")
+            to_local(tx.transaction_date).strftime("%Y-%m-%d")
             if tx.transaction_date
-            else datetime.now(UTC).strftime("%Y-%m-%d")
+            else now_local().strftime("%Y-%m-%d")
         )
         return json.dumps({
             "status": "success",
@@ -336,9 +349,9 @@ class FinanceToolExecutor:
         updated_from = await self._svc._repo.get_account_by_id(from_acc.id, owner_jid)
         updated_to = await self._svc._repo.get_account_by_id(to_acc.id, owner_jid)
         date_str = (
-            tx.transaction_date.strftime("%Y-%m-%d")
+            to_local(tx.transaction_date).strftime("%Y-%m-%d")
             if tx.transaction_date
-            else datetime.now(UTC).strftime("%Y-%m-%d")
+            else now_local().strftime("%Y-%m-%d")
         )
         return json.dumps({
             "status": "success",
@@ -399,7 +412,6 @@ class FinanceToolExecutor:
         }, ensure_ascii=False)
 
     async def _get_transactions(self, owner_jid: str, args: dict) -> str:
-        from datetime import datetime
 
         limit_val = args.get("limit")
         try:
@@ -424,17 +436,11 @@ class FinanceToolExecutor:
                     category_id = c.id
                     break
 
-        # Parse date_from / date_to
-        def _parse_date(val: str | None):
-            if not val:
-                return None
-            try:
-                return datetime.fromisoformat(val).replace(tzinfo=UTC)
-            except (ValueError, TypeError):
-                return None
-
-        date_from = _parse_date(args.get("date_from"))
-        date_to = _parse_date(args.get("date_to"))
+        # date_from / date_to adalah tanggal lokal; date_to inklusif sampai akhir hari.
+        day_from = parse_local_date(args.get("date_from"))
+        day_to = parse_local_date(args.get("date_to"))
+        date_from = day_bounds_utc(day_from)[0] if day_from else None
+        date_to = day_bounds_utc(day_to)[1] - timedelta(microseconds=1) if day_to else None
         transaction_type: str | None = args.get("transaction_type")
 
         transactions = await self._svc.get_recent_transactions(
@@ -452,7 +458,7 @@ class FinanceToolExecutor:
             "transactions": [
                 {
                     "transaction_id": tx.human_tx_id or tx.id,
-                    "date": tx.transaction_date.strftime("%Y-%m-%d"),
+                    "date": to_local(tx.transaction_date).strftime("%Y-%m-%d"),
                     "type": tx.transaction_type.value,
                     "amount": float(tx.amount),
                     "description": tx.description,
@@ -583,7 +589,6 @@ class FinanceToolExecutor:
         }, ensure_ascii=False)
 
     async def _get_transaction_detail(self, owner_jid: str, args: dict) -> str:
-        from datetime import datetime
 
         keyword: str | None = args.get("keyword")
         date_str: str | None = args.get("date")
@@ -594,12 +599,7 @@ class FinanceToolExecutor:
         except (ValueError, TypeError):
             limit = 5
 
-        date = None
-        if date_str:
-            try:
-                date = datetime.fromisoformat(date_str).replace(tzinfo=UTC)
-            except (ValueError, TypeError):
-                pass
+        date = parse_local_date(date_str)
 
         transactions = await self._svc.search_transactions(
             owner_jid,
@@ -622,7 +622,7 @@ class FinanceToolExecutor:
             "transactions": [
                 {
                     "transaction_id": tx.human_tx_id or tx.id,
-                    "date": tx.transaction_date.strftime("%Y-%m-%d"),
+                    "date": to_local(tx.transaction_date).strftime("%Y-%m-%d"),
                     "type": tx.transaction_type.value,
                     "amount": float(tx.amount),
                     "description": tx.description,
@@ -890,8 +890,7 @@ class FinanceToolExecutor:
 
     async def _delete_budget(self, owner_jid: str, arguments: dict) -> str:
         import calendar
-        from datetime import UTC, datetime
-        now = datetime.now(UTC)
+        now = now_local()
 
         category_name: str = arguments.get("category_name", "")
         month: int = int(arguments.get("month") or now.month)

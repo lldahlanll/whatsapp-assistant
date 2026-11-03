@@ -56,18 +56,28 @@ class IFinanceRepository(ABC):
 
     @abstractmethod
     async def save_transaction_atomic(
-        self, transaction: FinanceTransaction, balance_updates: dict[str, Decimal]
-    ) -> FinanceTransaction: ...
+        self, transaction: FinanceTransaction, balance_deltas: dict[str, Decimal]
+    ) -> FinanceTransaction:
+        """Simpan transaksi dan tambahkan delta ke saldo tiap rekening dalam satu transaksi DB.
+
+        Raises FinanceBalanceConflictError bila rekening tidak ada atau saldo akan minus.
+        """
 
     @abstractmethod
     async def reverse_transaction_atomic(
-        self, original_tx_id: str, owner_jid: str, reversal_tx: FinanceTransaction, balance_updates: dict[str, Decimal]
-    ) -> FinanceTransaction: ...
+        self, original_tx_id: str, owner_jid: str, reversal_tx: FinanceTransaction, balance_deltas: dict[str, Decimal]
+    ) -> FinanceTransaction:
+        """Tandai transaksi asli reversed, simpan reversal, dan terapkan delta saldo secara atomik.
+
+        Raises FinanceTransactionConflictError bila transaksi asli sudah di-reverse,
+        FinanceBalanceConflictError bila saldo akan minus.
+        """
 
     @abstractmethod
     async def update_transaction_atomic(
-        self, transaction: FinanceTransaction, balance_updates: dict[str, Decimal]
-    ) -> FinanceTransaction: ...
+        self, transaction: FinanceTransaction, balance_deltas: dict[str, Decimal]
+    ) -> FinanceTransaction:
+        """Perbarui transaksi dan terapkan delta saldo secara atomik (lihat save_transaction_atomic)."""
 
     @abstractmethod
     async def get_transaction_by_id(self, tx_id: str, owner_jid: str) -> FinanceTransaction | None: ...

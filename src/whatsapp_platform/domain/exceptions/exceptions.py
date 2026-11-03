@@ -43,3 +43,19 @@ class InfrastructureException(WhatsAppPlatformException):
 
 class GatewayException(InfrastructureException):
     """Raised when WhatsApp Gateway encounters an error."""
+
+
+class FinanceBalanceConflictError(DomainException):
+    """Perubahan saldo ditolak: rekening tidak ditemukan atau saldo akan menjadi minus."""
+
+    def __init__(self, account_id: str):
+        self.account_id = account_id
+        super().__init__(f"Balance update rejected for account '{account_id}'")
+
+
+class FinanceTransactionConflictError(DomainException):
+    """Transaksi sudah berubah status (mis. sudah di-reverse) saat akan diproses."""
+
+    def __init__(self, transaction_id: str):
+        self.transaction_id = transaction_id
+        super().__init__(f"Transaction '{transaction_id}' is no longer in the expected state")
