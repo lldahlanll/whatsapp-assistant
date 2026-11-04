@@ -143,6 +143,9 @@ class NineRouterProvider(ILLMProvider):
         payload: dict[str, Any] = {
             "model": model,
             "messages": _build_openai_messages(messages),
+            # 9router membalas SSE (text/event-stream) bila stream tidak disebut;
+            # klien ini mem-parse satu objek JSON, jadi streaming harus eksplisit mati.
+            "stream": False,
         }
         if tools:
             payload["tools"] = [t.to_openai_schema() for t in tools]
