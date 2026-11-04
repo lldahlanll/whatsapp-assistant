@@ -14,6 +14,7 @@ import structlog
 
 from whatsapp_platform.domain.entities.finance import (
     AccountType,
+    BudgetAlert,
     BudgetProgress,
     FinanceAccount,
     FinanceBudget,
@@ -34,7 +35,7 @@ from whatsapp_platform.features.finance.default_categories import (
 from whatsapp_platform.features.finance.parser import (
     guess_category_from_text,
 )
-from whatsapp_platform.shared.utils.timezone import month_bounds_utc, now_local
+from whatsapp_platform.shared.utils.timezone import month_bounds_utc, now_local, to_local
 
 if TYPE_CHECKING:
     from whatsapp_platform.domain.repositories.finance_repository import IFinanceRepository
@@ -92,6 +93,9 @@ class ReversalTransactionError(FinanceServiceError):
 # Saldo disimpan sebagai REAL di SQLite (presisi ~15 digit). Batasi nominal & pembulatan agar tetap eksak.
 MAX_AMOUNT = Decimal("1000000000000")  # 1 triliun
 _CENTS = Decimal("0.01")
+
+# Persentase pemakaian budget yang memicu peringatan saat pertama kali terlewati.
+BUDGET_ALERT_THRESHOLDS: tuple[int, ...] = (80, 100)
 
 
 def _normalize_amount(amount: Decimal, too_small_message: str) -> Decimal:
@@ -867,6 +871,7 @@ class FinanceService:
         amount: Decimal,
         month: int | None = None,
         year: int | None = None,
+        recurring: bool = True,
     ) -> BudgetProgress:
         if amount <= 0:
             raise InvalidAmountError("Jumlah budget harus lebih dari 0.")
@@ -893,6 +898,7 @@ class FinanceService:
             updated_at=datetime.now(UTC),
             category_name=category.name,
             category_icon=category.icon,
+            is_recurring=recurring,
         )
         await self._repo.upsert_budget(budget)
         progress = await self._repo.get_budget_progress(owner_jid, category.id, m, y)
@@ -924,6 +930,7 @@ class FinanceService:
             raise FinanceServiceError(f"Tahun '{y}' tidak valid.")
 
         category = await self.resolve_expense_category(owner_jid, category_name)
+        await self._carry_over_if_current(owner_jid, m, y)
         return await self._repo.get_budget_progress(owner_jid, category.id, m, y)
 
     async def list_budgets(
@@ -942,6 +949,7 @@ class FinanceService:
         if y < 2000 or y > 2100:
             raise FinanceServiceError(f"Tahun '{y}' tidak valid.")
 
+        await self._carry_over_if_current(owner_jid, m, y)
         return await self._repo.list_budgets_with_progress(owner_jid, m, y)
 
     async def delete_budget(
@@ -961,6 +969,7 @@ class FinanceService:
             raise FinanceServiceError(f"Tahun '{y}' tidak valid.")
 
         category = await self.resolve_expense_category(owner_jid, category_name)
+        await self._carry_over_if_current(owner_jid, m, y)
         success = await self._repo.delete_budget(owner_jid, category.id, m, y)
         if not success:
             raise BudgetNotFoundError(
@@ -968,6 +977,41 @@ class FinanceService:
             )
         logger.info("Budget deleted", owner=owner_jid, category=category.name, month=m, year=y)
         return True
+
+    async def _carry_over_if_current(self, owner_jid: str, month: int, year: int) -> None:
+        """Salin budget berulang ke bulan berjalan (hanya bulan berjalan, tidak ke masa lalu/depan)."""
+        now = now_local()
+        if (year, month) == (now.year, now.month):
+            await self._repo.carry_over_recurring_budgets(owner_jid, month, year)
+
+    async def get_budget_alert(self, owner_jid: str, tx: FinanceTransaction) -> BudgetAlert | None:
+        """Peringatan bila pengeluaran ``tx`` membuat kategori BARU melewati 80% / 100% budget.
+
+        Hanya untuk pengeluaran di bulan berjalan. Tidak pernah melempar error: kegagalan
+        pengecekan budget tidak boleh menggagalkan pencatatan transaksi.
+        """
+        try:
+            if tx.transaction_type != TransactionType.EXPENSE or not tx.category_id:
+                return None
+            now = now_local()
+            local = to_local(tx.transaction_date)
+            if (local.year, local.month) != (now.year, now.month):
+                return None
+            await self._repo.carry_over_recurring_budgets(owner_jid, now.month, now.year)
+            progress = await self._repo.get_budget_progress(
+                owner_jid, tx.category_id, now.month, now.year
+            )
+            if not progress or progress.budget.amount <= 0:
+                return None
+            before = float((progress.spent - tx.amount) / progress.budget.amount * 100)
+            after = progress.percentage
+            for threshold in sorted(BUDGET_ALERT_THRESHOLDS, reverse=True):
+                if before < threshold <= after:
+                    return BudgetAlert(progress=progress, threshold=threshold)
+            return None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Budget alert check failed", owner=owner_jid, error=str(exc))
+            return None
 
     # ── Reset ──────────────────────────────────────────────────────────────────
 

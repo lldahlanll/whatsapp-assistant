@@ -11,6 +11,7 @@ from whatsapp_platform.features.commands.context import CommandContext
 from whatsapp_platform.features.finance.formatter import (
     format_accounts_list,
     format_balance,
+    format_budget_alert,
     format_budget_list,
     format_budget_progress,
     format_finance_error,
@@ -61,9 +62,10 @@ _HELP_TEXT = (
     "\n"
     "*Budget / Anggaran:*\n"
     "  `!finance budget` — lihat semua budget bulan ini\n"
-    "  `!finance budget makan 1jt` — atur budget kategori\n"
+    "  `!finance budget makan 1jt` — atur budget (otomatis berulang tiap bulan)\n"
     "  `!finance budget makan` — cek progres budget\n"
-    "  `!finance budget hapus makan` — hapus budget\n"
+    "  `!finance budget hapus makan` — hapus budget & hentikan perulangan\n"
+    "  _Bot memberi peringatan saat pemakaian budget melewati 80% dan 100%._\n"
     "\n"
     "*Saldo & Laporan:*\n"
     "  `!finance saldo` — lihat semua saldo\n"
@@ -261,7 +263,11 @@ class FinanceCommandHandler(BaseCommandHandler):
             account_id=account_id,
             idempotency_key=_command_idempotency_key(ctx),
         )
-        await ctx.reply(format_transaction_added(tx))
+        reply = format_transaction_added(tx)
+        alert = await self._svc.get_budget_alert(owner_jid, tx)
+        if alert:
+            reply = f"{reply}\n\n{format_budget_alert(alert)}"
+        await ctx.reply(reply)
 
     async def _handle_transfer(
         self, ctx: CommandContext, owner_jid: str, rest: list[str]
@@ -530,7 +536,8 @@ class FinanceCommandHandler(BaseCommandHandler):
                 return
             category_name = " ".join(rest[1:])
             await self._svc.delete_budget(owner_jid, category_name)
-            await ctx.reply(f"Budget untuk kategori *{category_name}* bulan ini berhasil dihapus.")
+            await ctx.reply(f"Budget untuk kategori *{category_name}* berhasil dihapus "
+                "dan tidak akan diulang lagi bulan depan.")
             return
 
         # 3. Check if an amount is present -> Create / Update budget

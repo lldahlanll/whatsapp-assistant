@@ -92,6 +92,9 @@ def _fast_add_expense(data: dict) -> str | None:
     balance_str = f"\n• Saldo Terkini: {_fmt_rp(new_balance)}" if new_balance is not None else ""
     date_line = f"• Tanggal: {date}\n" if date else ""
 
+    alert = data.get("budget_alert")
+    alert_str = f"\n\n{alert}" if alert else ""
+
     return (
         f"*Pengeluaran Dicatat*\n\n"
         f"• Jumlah: {_fmt_rp(amount)}\n"
@@ -100,6 +103,7 @@ def _fast_add_expense(data: dict) -> str | None:
         f"• Rekening: {account}\n"
         f"• Catatan: {desc}"
         f"{balance_str}"
+        f"{alert_str}"
     )
 
 

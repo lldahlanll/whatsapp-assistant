@@ -441,7 +441,7 @@ FINANCE_TOOLS: list[ToolDefinition] = [
         description=(
             "Membuat atau memperbarui (upsert) budget / anggaran pengeluaran untuk kategori tertentu. "
             "Contoh: 'Budget makan bulan ini 1 juta', 'Buat budget transport 500rb bulan ini', "
-            "'Atur budget hiburan 300rb'."
+            "'Atur budget hiburan 300rb'. Budget otomatis berulang tiap bulan sampai dihapus."
         ),
         parameters=[
             ToolParameter(

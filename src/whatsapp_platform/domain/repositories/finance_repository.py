@@ -162,6 +162,16 @@ class IFinanceRepository(ABC):
     ) -> bool: ...
 
     @abstractmethod
+    async def carry_over_recurring_budgets(
+        self, owner_jid: str, month: int, year: int
+    ) -> int:
+        """Salin budget berulang dari bulan sebelumnya ke (month, year) bila belum ada.
+
+        Return jumlah budget yang dibuat.
+        """
+        ...
+
+    @abstractmethod
     async def get_budget_progress(
         self, owner_jid: str, category_id: str, month: int, year: int
     ) -> BudgetProgress | None: ...

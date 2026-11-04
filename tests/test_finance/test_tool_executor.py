@@ -33,6 +33,7 @@ def chat_jid() -> JID:
 def mock_service() -> AsyncMock:
     svc = AsyncMock()
     svc._repo = AsyncMock()
+    svc.get_budget_alert.return_value = None
     return svc
 
 

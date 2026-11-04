@@ -7,6 +7,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from whatsapp_platform.domain.entities.finance import (
+    BudgetAlert,
     BudgetProgress,
     FinanceAccount,
     FinanceTransaction,
@@ -252,6 +253,20 @@ def format_budget_progress(progress: BudgetProgress) -> str:
         f"Progress: *{int(progress.percentage)}%* ({status_str})",
     ]
     return "\n".join(lines)
+
+
+def format_budget_alert(alert: BudgetAlert) -> str:
+    """Satu blok peringatan budget untuk ditempel di bawah konfirmasi pengeluaran."""
+    p = alert.progress
+    cat = p.budget.category_name or "Kategori"
+    icon = f"{p.budget.category_icon} " if p.budget.category_icon else ""
+    used = f"{_fmt(p.spent)} dari {_fmt(p.budget.amount)} ({int(p.percentage)}%)"
+    if p.spent > p.budget.amount:
+        over = p.spent - p.budget.amount
+        return f"🚨 *Budget {icon}{cat} terlewati!* Terpakai {used}. Lebih {_fmt(over)}."
+    if alert.threshold >= 100:
+        return f"🚨 *Budget {icon}{cat} habis!* Terpakai {used}."
+    return f"⚠️ *Budget {icon}{cat} hampir habis.* Terpakai {used}. Sisa {_fmt(p.remaining)}."
 
 
 def format_budget_list(

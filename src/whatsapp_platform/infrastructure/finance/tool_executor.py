@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from whatsapp_platform.features.finance.formatter import format_budget_alert
 from whatsapp_platform.features.finance.service import (
     AccountNotFoundError,
     AccountRequiredError,
@@ -273,6 +274,7 @@ class FinanceToolExecutor:
                         data.pop("balance", None)
                         data.pop("from_new_balance", None)
                         data.pop("to_new_balance", None)
+                        data.pop("budget_alert", None)  # memuat nominal budget pribadi
                         if isinstance(data.get("transaction"), dict):
                             data["transaction"].pop("new_balance", None)
                             data["transaction"].pop("balance", None)
@@ -418,6 +420,8 @@ class FinanceToolExecutor:
             idempotency_key=_idempotency_key(message_id, "finance_add_expense", args),
         )
         current_acc = await self._svc._repo.get_account_by_id(tx.account_id, owner_jid)
+        alert = await self._svc.get_budget_alert(owner_jid, tx)
+        budget_alert = format_budget_alert(alert) if alert else None
         date_str = (
             to_local(tx.transaction_date).strftime("%Y-%m-%d")
             if tx.transaction_date
@@ -434,6 +438,7 @@ class FinanceToolExecutor:
             "category_name": tx.category_name,
             "description": tx.description,
             "new_balance": float(current_acc.balance) if current_acc else None,
+            "budget_alert": budget_alert,
             "message": (
                 f"Pengeluaran Rp {int(amount):,} dari {tx.account_name} berhasil dicatat."
             ),

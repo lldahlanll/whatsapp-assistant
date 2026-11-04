@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 from datetime import date as date_type
@@ -66,6 +67,7 @@ def _budget_from_model(
         updated_at=m.updated_at,
         category_name=category_name,
         category_icon=category_icon,
+        is_recurring=bool(m.is_recurring),
     )
 
 
@@ -885,6 +887,7 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
             model = result.scalar_one_or_none()
             if model:
                 model.amount = budget.amount
+                model.is_recurring = budget.is_recurring
                 model.updated_at = datetime.now(UTC)
             else:
                 model = FinanceBudgetModel(
@@ -894,6 +897,7 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
                     amount=budget.amount,
                     month=budget.month,
                     year=budget.year,
+                    is_recurring=budget.is_recurring,
                     created_at=budget.created_at,
                     updated_at=budget.updated_at,
                 )
@@ -971,8 +975,77 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
             if not model:
                 return False
             await session.delete(model)
+            # Hentikan perulangan: bulan-bulan sebelumnya tidak boleh menyalin ulang budget ini.
+            await session.execute(
+                update(FinanceBudgetModel)
+                .where(
+                    FinanceBudgetModel.owner_jid == owner_jid,
+                    FinanceBudgetModel.category_id == category_id,
+                )
+                .values(is_recurring=False)
+            )
             await session.commit()
             return True
+
+    async def carry_over_recurring_budgets(
+        self, owner_jid: str, month: int, year: int
+    ) -> int:
+        target = year * 12 + month
+        async with self._session() as session:
+            existing = set(
+                (
+                    await session.execute(
+                        select(FinanceBudgetModel.category_id).where(
+                            FinanceBudgetModel.owner_jid == owner_jid,
+                            FinanceBudgetModel.month == month,
+                            FinanceBudgetModel.year == year,
+                        )
+                    )
+                ).scalars()
+            )
+            earlier = (
+                await session.execute(
+                    select(FinanceBudgetModel)
+                    .where(
+                        FinanceBudgetModel.owner_jid == owner_jid,
+                        (FinanceBudgetModel.year * 12 + FinanceBudgetModel.month) < target,
+                    )
+                    .order_by(FinanceBudgetModel.year.desc(), FinanceBudgetModel.month.desc())
+                )
+            ).scalars().all()
+
+            seen: set[str] = set()
+            created = 0
+            now = datetime.now(UTC)
+            for src in earlier:
+                if src.category_id in seen:
+                    continue
+                seen.add(src.category_id)  # hanya baris terbaru per kategori yang menentukan
+                if src.category_id in existing or not src.is_recurring:
+                    continue
+                session.add(
+                    FinanceBudgetModel(
+                        id=str(uuid.uuid4()),
+                        owner_jid=owner_jid,
+                        category_id=src.category_id,
+                        amount=src.amount,
+                        month=month,
+                        year=year,
+                        is_recurring=True,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                created += 1
+            if not created:
+                return 0
+            try:
+                await session.commit()
+            except IntegrityError:
+                # Request lain sudah menyalin lebih dulu; aman diabaikan.
+                await session.rollback()
+                return 0
+            return created
 
     async def get_budget_progress(
         self, owner_jid: str, category_id: str, month: int, year: int
