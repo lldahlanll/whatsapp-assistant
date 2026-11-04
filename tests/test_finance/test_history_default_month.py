@@ -98,3 +98,20 @@ async def test_explicit_dates_beat_month() -> None:
     )
     assert out["period"] == "custom"
     assert get.call_args.kwargs["date_to"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("year", "month", "days"),
+    [(2026, 1, 31), (2026, 2, 28), (2028, 2, 29), (2026, 4, 30), (2026, 12, 31)],
+)
+async def test_month_range_follows_real_calendar(year: int, month: int, days: int) -> None:
+    from whatsapp_platform.shared.utils.timezone import to_local
+
+    ex, get = _executor()
+    await ex._get_transactions("u", {"month": month, "year": year})
+    kw = get.call_args.kwargs
+    first, last = to_local(kw["date_from"]), to_local(kw["date_to"])
+    assert (first.year, first.month, first.day) == (year, month, 1)
+    assert (last.year, last.month, last.day) == (year, month, days)
+    assert (last.hour, last.minute) == (23, 59)
