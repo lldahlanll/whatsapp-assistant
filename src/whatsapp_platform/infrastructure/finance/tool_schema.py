@@ -177,7 +177,7 @@ FINANCE_TOOLS: list[ToolDefinition] = [
             ToolParameter(
                 name="limit",
                 type="integer",
-                description="Jumlah transaksi yang ditampilkan (default 10, maksimal 30).",
+                description="Jumlah transaksi yang ditampilkan (default 30 untuk riwayat sebulan, maksimal 30).",
                 required=False,
             ),
             ToolParameter(
@@ -190,6 +190,32 @@ FINANCE_TOOLS: list[ToolDefinition] = [
                 name="transaction_type",
                 type="string",
                 description="Filter tipe transaksi: 'income', 'expense', atau 'transfer' (opsional).",
+                required=False,
+            ),
+            ToolParameter(
+                name="month",
+                type="integer",
+                description=(
+                    "Bulan tertentu (1-12) untuk riwayat sebulan penuh, misalnya 1 untuk Januari. "
+                    "Gunakan ini bila pengguna menyebut nama bulan selain bulan ini/bulan lalu. "
+                    "Jangan hitung tanggal sendiri."
+                ),
+                required=False,
+            ),
+            ToolParameter(
+                name="year",
+                type="integer",
+                description="Tahun untuk 'month' (opsional; kosong = tahun yang paling masuk akal).",
+                required=False,
+            ),
+            ToolParameter(
+                name="period",
+                type="string",
+                description=(
+                    "Periode riwayat bila date_from/date_to tidak diisi: 'this_month' "
+                    "(default, bulan berjalan) atau 'last_month' (hanya jika pengguna "
+                    "meminta bulan lalu)."
+                ),
                 required=False,
             ),
             ToolParameter(

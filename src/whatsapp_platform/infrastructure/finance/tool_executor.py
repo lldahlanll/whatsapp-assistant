@@ -24,6 +24,7 @@ from whatsapp_platform.features.finance.service import (
 )
 from whatsapp_platform.shared.utils.timezone import (
     day_bounds_utc,
+    month_bounds_utc,
     now_local,
     parse_local_date,
     parse_local_datetime,
@@ -525,11 +526,32 @@ class FinanceToolExecutor:
 
     async def _get_transactions(self, owner_jid: str, args: dict) -> str:
 
+        # Tanpa date_from/date_to, riwayat default-nya bulan berjalan (WIB);
+        # period="last_month" untuk bulan lalu.
+        has_explicit_range = bool(args.get("date_from") or args.get("date_to"))
+        month_arg = args.get("month")
+        year_arg = args.get("year")
+        req_month: int | None = None
+        req_year: int | None = None
+        if not has_explicit_range and month_arg is not None:
+            try:
+                req_month = int(month_arg)
+                req_year = int(year_arg) if year_arg is not None else None
+            except (ValueError, TypeError):
+                req_month = 0
+            if not (1 <= req_month <= 12) or (
+                req_year is not None and not (2000 <= req_year <= 2100)
+            ):
+                return json.dumps(
+                    {"status": "error", "message": "Bulan harus 1-12 dan tahun 2000-2100."},
+                    ensure_ascii=False,
+                )
         limit_val = args.get("limit")
+        default_limit = 10 if has_explicit_range else 30
         try:
-            limit = min(int(limit_val), 30) if limit_val is not None else 10
+            limit = min(max(int(limit_val), 1), 30) if limit_val is not None else default_limit
         except (ValueError, TypeError):
-            limit = 10
+            limit = default_limit
 
         account_id = None
         account_name: str | None = args.get("account_name")
@@ -555,17 +577,44 @@ class FinanceToolExecutor:
         date_to = day_bounds_utc(day_to)[1] - timedelta(microseconds=1) if day_to else None
         transaction_type: str | None = args.get("transaction_type")
 
+        period = "custom"
+        period_label: str | None = None
+        if not has_explicit_range:
+            today = now_local()
+            year, month = today.year, today.month
+            if req_month is not None:
+                # Tahun tidak disebut: tahun berjalan, atau tahun lalu bila bulan itu belum tiba.
+                month = req_month
+                year = req_year if req_year is not None else (
+                    today.year if req_month <= today.month else today.year - 1
+                )
+                period = "month"
+            elif str(args.get("period") or "").strip().lower() == "last_month":
+                period = "last_month"
+                year, month = (year - 1, 12) if month == 1 else (year, month - 1)
+            else:
+                period = "this_month"
+            start_utc, end_utc = month_bounds_utc(year, month)
+            date_from, date_to = start_utc, end_utc - timedelta(microseconds=1)
+            period_label = f"{year:04d}-{month:02d}"
+
+        # Ambil limit+1 untuk mendeteksi apakah hasil terpotong.
         transactions = await self._svc.get_recent_transactions(
             owner_jid,
-            limit=limit,
+            limit=limit + 1,
             account_id=account_id,
             transaction_type=transaction_type,
             date_from=date_from,
             date_to=date_to,
             category_id=category_id,
         )
+        truncated = len(transactions) > limit
+        transactions = transactions[:limit]
         return json.dumps({
             "status": "success",
+            "period": period,
+            "period_month": period_label,
+            "truncated": truncated,
             "count": len(transactions),
             "transactions": [
                 {
