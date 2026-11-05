@@ -159,3 +159,17 @@ class BudgetAlert:
 
     progress: BudgetProgress
     threshold: int
+
+
+@dataclass
+class FinanceAuditEntry:
+    """Satu catatan riwayat penghapusan data finance."""
+
+    id: str
+    owner_jid: str
+    entity_type: str  # transaction | account | budget | category
+    entity_id: str | None
+    action: str  # delete | reset
+    summary: str
+    snapshot: dict
+    created_at: datetime

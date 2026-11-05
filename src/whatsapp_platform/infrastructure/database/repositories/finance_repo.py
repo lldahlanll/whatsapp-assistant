@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -21,6 +22,7 @@ from whatsapp_platform.domain.entities.finance import (
     CategorySummary,
     CategoryType,
     FinanceAccount,
+    FinanceAuditEntry,
     FinanceBudget,
     FinanceCategory,
     FinanceTransaction,
@@ -34,6 +36,7 @@ from whatsapp_platform.domain.exceptions import (
 from whatsapp_platform.domain.repositories.finance_repository import IFinanceRepository
 from whatsapp_platform.infrastructure.database.models import (
     FinanceAccountModel,
+    FinanceAuditLogModel,
     FinanceBudgetModel,
     FinanceCategoryModel,
     FinanceTransactionModel,
@@ -126,6 +129,37 @@ def _transaction_from_model(
     )
 
 
+def _row_snapshot(model: Any, **extra: Any) -> dict[str, Any]:
+    """Salin semua kolom baris ORM ke dict yang aman untuk JSON (Decimal/datetime -> str)."""
+    data = {c.key: getattr(model, c.key) for c in model.__mapper__.column_attrs}
+    data.update(extra)
+    return json.loads(json.dumps(data, default=str))
+
+
+def _add_audit(
+    session: AsyncSession,
+    owner_jid: str,
+    entity_type: str,
+    entity_id: str | None,
+    action: str,
+    summary: str,
+    snapshot: dict[str, Any],
+) -> None:
+    """Tambah catatan audit ke session yang sama dengan penghapusan (satu transaksi DB)."""
+    session.add(
+        FinanceAuditLogModel(
+            id=str(uuid.uuid4()),
+            owner_jid=owner_jid,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            action=action,
+            summary=summary,
+            snapshot=json.dumps(snapshot, ensure_ascii=False),
+            created_at=datetime.now(UTC),
+        )
+    )
+
+
 class SQLAlchemyFinanceRepository(IFinanceRepository):
     def __init__(
         self,
@@ -206,6 +240,11 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
             if not m:
                 return False
             m.is_active = False
+            _add_audit(
+                session, owner_jid, "account", m.id, "delete",
+                f"Rekening {m.name} ({m.account_type}), saldo {m.balance}",
+                _row_snapshot(m),
+            )
             await session.commit()
             return True
 
@@ -667,6 +706,39 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
                 if marked.rowcount != 1:  # type: ignore[attr-defined]
                     return False
 
+                acc_names = {
+                    a.id: a.name
+                    for a in (
+                        await session.execute(
+                            select(FinanceAccountModel).where(
+                                FinanceAccountModel.id.in_(
+                                    [i for i in (tx_m.account_id, tx_m.transfer_to_account_id) if i]
+                                )
+                            )
+                        )
+                    ).scalars()
+                }
+                cat_name = None
+                if tx_m.category_id:
+                    cat = (
+                        await session.execute(
+                            select(FinanceCategoryModel).where(
+                                FinanceCategoryModel.id == tx_m.category_id
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    cat_name = cat.name if cat else None
+                _add_audit(
+                    session, owner_jid, "transaction", tx_m.id, "delete",
+                    f"{tx_m.transaction_type} {tx_m.amount} - {tx_m.description or '-'}",
+                    _row_snapshot(
+                        tx_m,
+                        account_name=acc_names.get(tx_m.account_id),
+                        transfer_to_account_name=acc_names.get(tx_m.transfer_to_account_id),
+                        category_name=cat_name,
+                    ),
+                )
+
                 # Kembalikan saldo akun
                 tx_type = tx_m.transaction_type
                 amount = Decimal(str(tx_m.amount))
@@ -974,6 +1046,17 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
             model = result.scalar_one_or_none()
             if not model:
                 return False
+            cat = (
+                await session.execute(
+                    select(FinanceCategoryModel).where(FinanceCategoryModel.id == category_id)
+                )
+            ).scalar_one_or_none()
+            cat_name = cat.name if cat else None
+            _add_audit(
+                session, owner_jid, "budget", model.id, "delete",
+                f"Budget {cat_name or category_id} {month:02d}/{year}: {model.amount}",
+                _row_snapshot(model, category_name=cat_name),
+            )
             await session.delete(model)
             # Hentikan perulangan: bulan-bulan sebelumnya tidak boleh menyalin ulang budget ini.
             await session.execute(
@@ -1144,6 +1227,24 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
             # Urutan penting: hapus dependant dulu sebelum parent
             counts: dict[str, int] = {}
 
+            # Audit: simpan semua baris yang akan dihapus (satu catatan per baris, satu transaksi DB).
+            for model_cls, etype in (
+                (FinanceTransactionModel, "transaction"),
+                (FinanceBudgetModel, "budget"),
+                (FinanceAccountModel, "account"),
+                (FinanceCategoryModel, "category"),
+            ):
+                rows = (
+                    await session.execute(
+                        select(model_cls).where(model_cls.owner_jid == owner_jid)
+                    )
+                ).scalars()
+                for row in rows:
+                    _add_audit(
+                        session, owner_jid, etype, row.id, "reset",
+                        f"Reset data: {etype}", _row_snapshot(row),
+                    )
+
             res = await session.execute(
                 sa_delete(FinanceTransactionModel).where(
                     FinanceTransactionModel.owner_jid == owner_jid
@@ -1175,3 +1276,28 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
             await session.commit()
             return counts
 
+
+    # ── Audit log ─────────────────────────────────────────────────────────────
+
+    async def get_audit_log(
+        self, owner_jid: str, limit: int = 20, entity_type: str | None = None
+    ) -> list[FinanceAuditEntry]:
+        async with self._session() as session:
+            q = select(FinanceAuditLogModel).where(FinanceAuditLogModel.owner_jid == owner_jid)
+            if entity_type:
+                q = q.where(FinanceAuditLogModel.entity_type == entity_type)
+            q = q.order_by(FinanceAuditLogModel.created_at.desc()).limit(limit)
+            rows = (await session.execute(q)).scalars().all()
+            return [
+                FinanceAuditEntry(
+                    id=r.id,
+                    owner_jid=r.owner_jid,
+                    entity_type=r.entity_type,
+                    entity_id=r.entity_id,
+                    action=r.action,
+                    summary=r.summary,
+                    snapshot=json.loads(r.snapshot or "{}"),
+                    created_at=r.created_at,
+                )
+                for r in rows
+            ]

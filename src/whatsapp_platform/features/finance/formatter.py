@@ -10,6 +10,7 @@ from whatsapp_platform.domain.entities.finance import (
     BudgetAlert,
     BudgetProgress,
     FinanceAccount,
+    FinanceAuditEntry,
     FinanceTransaction,
     MonthlySummary,
     TransactionType,
@@ -290,6 +291,57 @@ def format_budget_list(
     if lines[-1] == "":
         lines.pop()
 
+    return "\n".join(lines)
+
+
+_AUDIT_LABELS = {
+    "transaction": "Transaksi",
+    "account": "Rekening",
+    "budget": "Budget",
+    "category": "Kategori",
+}
+
+
+def _audit_detail(entry: FinanceAuditEntry) -> str:
+    snap = entry.snapshot
+    try:
+        if entry.entity_type == "transaction":
+            tx_type = {"income": "Pemasukan", "expense": "Pengeluaran", "transfer": "Transfer"}.get(
+                snap.get("transaction_type", ""), snap.get("transaction_type", ""))
+            parts = [f"{tx_type} {_fmt(Decimal(snap['amount']))}"]
+            if snap.get("description"):
+                parts.append(snap["description"])
+            if snap.get("category_name"):
+                parts.append(snap["category_name"])
+            if snap.get("account_name"):
+                parts.append(f"({snap['account_name']})")
+            if snap.get("human_tx_id"):
+                parts.append(f"#{snap['human_tx_id']}")
+            return " · ".join(parts)
+        if entry.entity_type == "account":
+            return f"{snap.get('name', '-')} ({snap.get('account_type', '-')}) — saldo {_fmt(Decimal(snap['balance']))}"
+        if entry.entity_type == "budget":
+            return (
+                f"{snap.get('category_name') or 'Kategori'} "
+                f"{int(snap['month']):02d}/{snap['year']} — {_fmt(Decimal(snap['amount']))}"
+            )
+        if entry.entity_type == "category":
+            return str(snap.get("name", "-"))
+    except (KeyError, ValueError, ArithmeticError):
+        pass
+    return entry.summary
+
+
+def format_audit_log(entries: list[FinanceAuditEntry]) -> str:
+    if not entries:
+        return "Belum ada riwayat data yang dihapus."
+    lines = ["*Riwayat Data Dihapus*", "━━━━━━━━━━━━━━━━━━"]
+    for e in entries:
+        when = to_local(e.created_at).strftime("%d/%m/%Y %H:%M")
+        label = _AUDIT_LABELS.get(e.entity_type, e.entity_type)
+        tag = " (reset)" if e.action == "reset" else ""
+        lines.append(f"🗑️ *{label}*{tag} — {when}")
+        lines.append(f"   {_audit_detail(e)}")
     return "\n".join(lines)
 
 

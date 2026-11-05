@@ -162,3 +162,21 @@ class FinanceBudgetModel(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
     )
+
+
+class FinanceAuditLogModel(Base):
+    """Jejak audit penghapusan data finance (snapshot baris sebelum dihapus)."""
+
+    __tablename__ = "finance_audit_log"
+    __table_args__ = (Index("ix_finance_audit_log_owner_created", "owner_jid", "created_at"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    owner_jid: Mapped[str] = mapped_column(String(100), nullable=False)
+    # transaction | account | budget | category
+    entity_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    entity_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # delete | reset
+    action: Mapped[str] = mapped_column(String(20), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    snapshot: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))

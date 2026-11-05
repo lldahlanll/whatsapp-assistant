@@ -17,6 +17,7 @@ from whatsapp_platform.domain.entities.finance import (
     BudgetAlert,
     BudgetProgress,
     FinanceAccount,
+    FinanceAuditEntry,
     FinanceBudget,
     FinanceCategory,
     FinanceTransaction,
@@ -1014,6 +1015,12 @@ class FinanceService:
             return None
 
     # ── Reset ──────────────────────────────────────────────────────────────────
+
+    async def get_audit_log(
+        self, owner_jid: str, limit: int = 15, entity_type: str | None = None
+    ) -> list[FinanceAuditEntry]:
+        """Riwayat data finance yang dihapus (terbaru dulu)."""
+        return await self._repo.get_audit_log(owner_jid, limit=limit, entity_type=entity_type)
 
     async def get_reset_preview(self, owner_jid: str) -> dict[str, int]:
         """Return hitungan data finance yang akan dihapus tanpa menghapusnya."""

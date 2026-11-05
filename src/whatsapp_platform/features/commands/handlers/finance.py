@@ -10,6 +10,7 @@ from whatsapp_platform.features.commands.base import BaseCommandHandler
 from whatsapp_platform.features.commands.context import CommandContext
 from whatsapp_platform.features.finance.formatter import (
     format_accounts_list,
+    format_audit_log,
     format_balance,
     format_budget_alert,
     format_budget_list,
@@ -65,6 +66,7 @@ _HELP_TEXT = (
     "  `!finance budget makan 1jt` — atur budget (otomatis berulang tiap bulan)\n"
     "  `!finance budget makan` — cek progres budget\n"
     "  `!finance budget hapus makan` — hapus budget & hentikan perulangan\n"
+    "  `!finance dihapus` — riwayat data yang dihapus (transaksi, rekening, budget)\n"
     "  _Bot memberi peringatan saat pemakaian budget melewati 80% dan 100%._\n"
     "\n"
     "*Saldo & Laporan:*\n"
@@ -158,6 +160,9 @@ class FinanceCommandHandler(BaseCommandHandler):
 
             elif sub in ("budget", "anggaran"):
                 await self._handle_budget(ctx, owner_jid, rest)
+
+            elif sub in ("dihapus", "deleted", "audit", "sampah"):
+                await self._handle_audit(ctx, owner_jid, rest)
 
             elif sub in ("reset", "hapus_semua", "clear_all"):
                 await self._handle_reset(ctx, owner_jid, rest)
@@ -323,6 +328,18 @@ class FinanceCommandHandler(BaseCommandHandler):
                 pass
         transactions = await self._svc.get_recent_transactions(owner_jid, limit=limit)
         await ctx.reply(format_transactions_list(transactions))
+
+    async def _handle_audit(
+        self, ctx: CommandContext, owner_jid: str, rest: list[str]
+    ) -> None:
+        limit = 15
+        if rest:
+            try:
+                limit = max(1, min(int(rest[0]), 30))
+            except ValueError:
+                pass
+        entries = await self._svc.get_audit_log(owner_jid, limit=limit)
+        await ctx.reply(format_audit_log(entries))
 
     async def _handle_report(
         self, ctx: CommandContext, owner_jid: str, rest: list[str]

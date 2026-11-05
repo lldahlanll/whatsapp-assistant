@@ -10,6 +10,7 @@ from whatsapp_platform.domain.entities.finance import (
     BudgetProgress,
     CategorySummary,
     FinanceAccount,
+    FinanceAuditEntry,
     FinanceBudget,
     FinanceCategory,
     FinanceTransaction,
@@ -193,3 +194,10 @@ class IFinanceRepository(ABC):
         """
         ...
 
+
+    @abstractmethod
+    async def get_audit_log(
+        self, owner_jid: str, limit: int = 20, entity_type: str | None = None
+    ) -> list[FinanceAuditEntry]:
+        """Riwayat data finance yang dihapus (terbaru dulu)."""
+        ...
