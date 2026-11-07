@@ -18,19 +18,14 @@ async def require_group_admin(ctx: CommandContext) -> bool:
     try:
         if ctx.group_mgmt_uc is None:
             raise RuntimeError("group management not configured")
-        info = await ctx.group_mgmt_uc.get_group_info(ctx.message.chat_jid)
+        is_admin = await ctx.group_mgmt_uc.is_admin(ctx.message.chat_jid, sender)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not verify group admin", chat=str(ctx.message.chat_jid), error=str(exc))
         await ctx.reply("❌ Tidak bisa memastikan status admin grup. Coba lagi nanti.")
         return False
 
-    for participant in info.get("participants", []):
-        if not participant.get("is_admin"):
-            continue
-        # Participant bisa tercatat sebagai nomor HP maupun LID; cocokkan keduanya.
-        ids = {participant.get("phone") or "", (participant.get("jid") or "").split("@")[0]}
-        if sender.user in ids:
-            return True
+    if is_admin:
+        return True
 
     logger.info(
         "Rejected group command from non-admin",

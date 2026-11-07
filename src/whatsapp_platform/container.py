@@ -311,7 +311,9 @@ class Container(IContainer):
         )
         self.register(SchedulerService, scheduler_service)
         if self.settings.scheduler_enabled:
-            composite_executor.register("reminder", ReminderToolExecutor(scheduler_service))
+            composite_executor.register(
+                "reminder", ReminderToolExecutor(scheduler_service, is_group_admin=manage_group_uc.is_admin)
+            )
 
         self.register(CompositeToolExecutor, composite_executor)
 

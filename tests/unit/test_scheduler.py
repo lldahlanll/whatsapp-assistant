@@ -408,3 +408,68 @@ async def test_send_failure_restores_schedule_for_retry(svc, clock, sender, repo
     [task] = await repo.list_active(OWNER)
     assert task.next_run_at == wib(2026, 11, 7, 12, 0) and task.run_count == 1 and task.fail_count == 0
 
+
+# ── Grup: hanya admin yang boleh membuat/menghapus pengingat ─────────────────
+
+
+async def test_ai_tool_in_group_requires_admin(svc):
+    group, user = JID.parse(GROUP), JID.parse(OWNER)
+    args = {"message": "Rapat", "delay_minutes": 10}
+
+    non_admin = ReminderToolExecutor(svc, is_group_admin=AsyncMock(return_value=False))
+    out = json.loads(await non_admin.execute("reminder_create", args, user, group))
+    assert out["status"] == "error" and "admin" in out["message"]
+
+    broken = ReminderToolExecutor(svc, is_group_admin=AsyncMock(side_effect=RuntimeError("timeout")))
+    out = json.loads(await broken.execute("reminder_create", args, user, group))
+    assert out["status"] == "error" and "memastikan" in out["message"]  # fail closed
+
+    admin_check = AsyncMock(return_value=True)
+    admin = ReminderToolExecutor(svc, is_group_admin=admin_check)
+    out = json.loads(await admin.execute("reminder_create", args, user, group))
+    assert out["status"] == "success"
+    admin_check.assert_awaited_once_with(group, user)
+
+    out = json.loads(await non_admin.execute("reminder_cancel", {"number": out["number"]}, user, group))
+    assert out["status"] == "error"
+    listing = json.loads(await non_admin.execute("reminder_list", {}, user, group))
+    assert listing["status"] == "success"  # melihat daftar tetap boleh
+
+    # Chat pribadi tidak butuh cek admin.
+    private = ReminderToolExecutor(svc, is_group_admin=AsyncMock(side_effect=AssertionError("no check")))
+    out = json.loads(await private.execute("reminder_create", args, user, user))
+    assert out["status"] == "success"
+
+
+def _group_ctx(args, is_admin):
+    ctx = MagicMock()
+    ctx.reply = AsyncMock()
+    ctx.message.sender_jid = JID.parse(OWNER)
+    ctx.message.chat_jid = JID.parse(GROUP)
+    ctx.command.args = args
+    ctx.command.name = "pengingat"
+    ctx.group_mgmt_uc.is_admin = AsyncMock(return_value=is_admin)
+    return ctx
+
+
+async def test_command_in_group_requires_admin(svc, repo):
+    handler = ReminderCommandHandler(svc)
+
+    ctx = _group_ctx(["10m", "rapat"], is_admin=False)
+    await handler.handle(ctx)
+    assert "admin grup" in ctx.reply.await_args.args[0]
+    assert await repo.list_active(OWNER) == []
+
+    ctx = _group_ctx(["10m", "rapat"], is_admin=True)
+    await handler.handle(ctx)
+    assert "Jadwal Tersimpan" in ctx.reply.await_args.args[0]
+
+    ctx = _group_ctx(["hapus", "1"], is_admin=False)
+    await handler.handle(ctx)
+    assert "admin grup" in ctx.reply.await_args.args[0]
+    assert len(await repo.list_active(OWNER)) == 1
+
+    ctx = _group_ctx([], is_admin=False)  # daftar boleh untuk semua anggota
+    await handler.handle(ctx)
+    assert "rapat" in ctx.reply.await_args.args[0]
+    ctx.group_mgmt_uc.is_admin.assert_not_awaited()

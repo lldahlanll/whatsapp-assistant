@@ -18,6 +18,18 @@ class GroupManagementUseCase:
             raise GatewayException("Target JID is not a group")
         return await self.gateway.get_group_info(group_jid)
 
+    async def is_admin(self, group_jid: JID, member_jid: JID) -> bool:
+        """True jika ``member_jid`` admin grup. Gagal ambil info grup -> exception (pemanggil fail closed)."""
+        info = await self.get_group_info(group_jid)
+        for participant in info.get("participants", []):
+            if not participant.get("is_admin"):
+                continue
+            # Participant bisa tercatat sebagai nomor HP maupun LID; cocokkan keduanya.
+            ids = {participant.get("phone") or "", (participant.get("jid") or "").split("@")[0]}
+            if member_jid.user in ids:
+                return True
+        return False
+
     async def get_invite_link(self, group_jid: JID, revoke: bool = False) -> str:
         if not group_jid.is_group:
             raise GatewayException("Target JID is not a group")

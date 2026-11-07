@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -37,9 +38,27 @@ def _is_group(chat_jid: Any) -> bool:
     return str(chat_jid).endswith("@g.us")
 
 
+# (group_jid, member_jid) -> True jika admin grup. Exception = tidak bisa dipastikan (fail closed).
+AdminCheck = Callable[[Any, Any], Awaitable[bool]]
+
+GROUP_ADMIN_ONLY_MESSAGE = "Di grup, pengingat hanya bisa dibuat atau dihapus oleh admin grup."
+
+
 class ReminderToolExecutor:
-    def __init__(self, scheduler: SchedulerService) -> None:
+    def __init__(self, scheduler: SchedulerService, is_group_admin: AdminCheck | None = None) -> None:
         self._svc = scheduler
+        self._is_group_admin = is_group_admin
+
+    async def _require_admin(self, chat_jid: Any, user_jid: Any) -> None:
+        if self._is_group_admin is None:
+            raise SchedulerError(GROUP_ADMIN_ONLY_MESSAGE)
+        try:
+            ok = await self._is_group_admin(chat_jid, user_jid)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not verify group admin for reminder", chat=str(chat_jid), error=str(exc))
+            raise SchedulerError("Tidak bisa memastikan status admin grup. Coba lagi nanti.") from exc
+        if not ok:
+            raise SchedulerError(GROUP_ADMIN_ONLY_MESSAGE)
 
     @property
     def is_enabled(self) -> bool:
@@ -56,6 +75,8 @@ class ReminderToolExecutor:
     ) -> str:
         owner, chat, is_group = str(user_jid), str(chat_jid), _is_group(chat_jid)
         try:
+            if is_group and tool_name in ("reminder_create", "reminder_cancel"):
+                await self._require_admin(chat_jid, user_jid)
             if tool_name == "reminder_create":
                 return await self._create(owner, chat, is_group, arguments)
             if tool_name == "reminder_list":

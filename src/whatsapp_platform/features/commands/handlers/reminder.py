@@ -7,6 +7,7 @@ import re
 from whatsapp_platform.domain.entities.schedule import TaskKind
 from whatsapp_platform.features.commands.base import BaseCommandHandler
 from whatsapp_platform.features.commands.context import CommandContext
+from whatsapp_platform.features.commands.group_permissions import require_group_admin
 from whatsapp_platform.features.scheduler.formatter import format_task_created, format_task_list
 from whatsapp_platform.features.scheduler.service import (
     WEEKDAYS,
@@ -67,6 +68,9 @@ class ReminderCommandHandler(BaseCommandHandler):
                 return
             if args[0].lower() in ("help", "bantuan", "panduan"):
                 await ctx.reply(_HELP)
+                return
+            # Di grup, membuat/menghapus pengingat = bot memposting teks ke grup -> khusus admin.
+            if is_group and not await require_group_admin(ctx):
                 return
             if args[0].lower() in ("hapus", "delete", "batal", "stop"):
                 if len(args) < 2 or not args[1].isdigit():
