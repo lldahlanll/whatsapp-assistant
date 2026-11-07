@@ -135,10 +135,17 @@ async def test_p1_scenario_finance_mutation_fast_path():
         name="finance_add_expense",
         arguments={"amount": 25000, "description": "beli makan 25rb", "account_name": "BCA"}
     )
+    fast_path_reply = AIResponse(text="✅ *Pengeluaran Dicatat*\n\n• Jumlah: Rp 25.000\n• Rekening: BCA", provider_used="gemini", key_index_used=0, token_usage={"prompt_tokens": 150, "completion_tokens": 10, "total_tokens": 160}, latency_ms=20.0)
+
+    async def run_tool_then_reply(**kwargs):
+        # Seperti AIService asli: tool dijalankan lewat executor yang diberikan, lalu fast-path membalas.
+        await kwargs["tool_executor"].execute(
+            tool_name=tool_call.name, arguments=tool_call.arguments, user_jid=None, chat_jid=None
+        )
+        return fast_path_reply
+
     mock_ai_service = AsyncMock()
-    mock_ai_service.generate_reply_with_tools = AsyncMock(
-        return_value=AIResponse(text="✅ *Pengeluaran Dicatat*\n\n• Jumlah: Rp 25.000\n• Rekening: BCA", provider_used="gemini", key_index_used=0, token_usage={"prompt_tokens": 150, "completion_tokens": 10, "total_tokens": 160}, latency_ms=20.0)
-    )
+    mock_ai_service.generate_reply_with_tools = AsyncMock(side_effect=run_tool_then_reply)
     mock_ai_service.append_to_context = AsyncMock()
 
     mock_get_conv_uc = AsyncMock()
@@ -146,6 +153,7 @@ async def test_p1_scenario_finance_mutation_fast_path():
 
     mock_tool_executor = AsyncMock()
     mock_tool_executor.is_enabled = True
+    mock_tool_executor.execute = AsyncMock(return_value='{"status": "success", "transaction_id": "TX1"}')
 
     settings = Settings(ai_finance_history_limit=5)
     use_case = AIReplyUseCase(

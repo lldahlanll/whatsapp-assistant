@@ -130,3 +130,63 @@ async def test_plain_path_blocks_claim_when_scheduler_disabled():
     )
     ai.generate_reply.assert_awaited_once()
     assert out.text == UNBACKED_REMINDER_REPLY
+
+
+# ── Pesan campuran pengingat + transaksi (celah: tool finance tidak ditawarkan) ──────
+
+MIXED_USER = "ingetin bayar air besok jam 9, terus catat juga makan 50rb"
+
+
+async def test_mixed_request_fabricated_expense_gets_warning_but_keeps_real_reminder():
+    ai = AsyncMock()
+    ex = _executor("success")
+
+    async def fake(**kwargs):
+        await kwargs["tool_executor"].execute(
+            tool_name="reminder_create", arguments={}, user_jid=None, chat_jid=None
+        )
+        return _resp("Pengingat no. 1 tersimpan untuk besok 09:00. Pengeluaran makan 50rb juga sudah dicatat.")
+
+    ai.generate_reply_with_tools = AsyncMock(side_effect=fake)
+    out = await _use_case(ai, ex).execute("c", _msg(MIXED_USER))
+    assert out.text.startswith("Pengingat no. 1 tersimpan")  # konfirmasi asli tetap terlihat
+    assert "belum tercatat" in out.text
+
+
+async def test_mixed_request_nothing_saved_is_replaced():
+    ai = AsyncMock()
+    ai.generate_reply_with_tools = AsyncMock(
+        return_value=_resp("Siap! Pengeluaran makan 50rb sudah dicatat dan pengingat diset.")
+    )
+    out = await _use_case(ai, _executor("success")).execute("c", _msg(MIXED_USER))
+    assert "belum diproses" in out.text
+
+
+async def test_real_finance_save_is_not_flagged():
+    ai = AsyncMock()
+    ex = _executor("success")
+
+    async def fake(**kwargs):
+        await kwargs["tool_executor"].execute(
+            tool_name="finance_add_expense", arguments={}, user_jid=None, chat_jid=None
+        )
+        return _resp("Pengeluaran makan Rp 50.000 berhasil dicatat.")
+
+    ai.generate_reply_with_tools = AsyncMock(side_effect=fake)
+    out = await _use_case(ai, ex).execute("c", _msg("catat pengeluaran makan 50rb"))
+    assert out.text == "Pengeluaran makan Rp 50.000 berhasil dicatat."
+
+
+async def test_reminder_confirmation_with_amount_not_flagged_as_finance():
+    ai = AsyncMock()
+    ex = _executor("success")
+
+    async def fake(**kwargs):
+        await kwargs["tool_executor"].execute(
+            tool_name="reminder_create", arguments={}, user_jid=None, chat_jid=None
+        )
+        return _resp("Pengingat no. 2 tersimpan: bayar listrik 200rb, tiap tanggal 5 09:00.")
+
+    ai.generate_reply_with_tools = AsyncMock(side_effect=fake)
+    out = await _use_case(ai, ex).execute("c", _msg("ingatkan bayar listrik 200rb tiap tanggal 5 jam 9"))
+    assert "Catatan" not in out.text

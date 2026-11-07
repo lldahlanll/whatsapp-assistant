@@ -22,7 +22,10 @@ from whatsapp_platform.domain.value_objects.message_content import (
 from whatsapp_platform.infrastructure.ai.ai_service import AIService
 from whatsapp_platform.infrastructure.ai.claim_guard import (
     UNBACKED_CLAIM_REPLY,
+    UNBACKED_FINANCE_NOTE,
+    UNBACKED_REMINDER_NOTE,
     UNBACKED_REMINDER_REPLY,
+    is_unbacked_finance_action_claim,
     is_unbacked_finance_claim,
     is_unbacked_reminder_claim,
 )
@@ -326,11 +329,9 @@ class AIReplyUseCase:
                 logger.warning("Blocked unbacked finance success claim", chat=chat_jid_str, intent=policy.intent)
                 response.text = UNBACKED_CLAIM_REPLY
 
-        # Janji "pengingat diset" tanpa reminder_create yang sukses = pesan tidak akan pernah terkirim.
-        reminder_saved = recorder is not None and "reminder_create" in recorder.succeeded
-        if not reminder_saved and is_unbacked_reminder_claim(trigger_text, response.text):
-            logger.warning("Blocked unbacked reminder claim", chat=chat_jid_str, intent=policy.intent)
-            response.text = UNBACKED_REMINDER_REPLY
+        response.text = self._guard_unbacked_claims(
+            trigger_text, response.text, recorder.succeeded if recorder else set(), chat_jid_str, policy.intent
+        )
 
         # 5. Persist trigger and AI reply to the context cache
         # Bytes gambar tidak disimpan ke konteks; cukup penanda teks.
@@ -346,6 +347,32 @@ class AIReplyUseCase:
 
         return response
 
+
+    @staticmethod
+    def _guard_unbacked_claims(
+        user_text: str | None, reply: str, succeeded: set[str], chat: str, intent: str
+    ) -> str:
+        """Ganti/tandai klaim sukses yang tidak didukung tool sukses di giliran ini.
+
+        Jika ada tool lain yang benar-benar sukses, balasan TIDAK diganti (agar konfirmasi yang benar
+        tetap terlihat dan user tidak mengulang -> data dobel), cukup ditambah catatan peringatan.
+        """
+        if not reply:
+            return reply
+        notes: list[str] = []
+        finance_saved = any(name.startswith("finance_") for name in succeeded)
+        if not finance_saved and is_unbacked_finance_action_claim(user_text, reply):
+            logger.warning("Blocked unbacked finance action claim", chat=chat, intent=intent)
+            if not succeeded:
+                return UNBACKED_CLAIM_REPLY
+            notes.append(UNBACKED_FINANCE_NOTE)
+        # Janji "pengingat diset" tanpa reminder_create yang sukses = pesan tidak akan pernah terkirim.
+        if "reminder_create" not in succeeded and is_unbacked_reminder_claim(user_text, reply):
+            logger.warning("Blocked unbacked reminder claim", chat=chat, intent=intent)
+            if not succeeded:
+                return UNBACKED_REMINDER_REPLY
+            notes.append(UNBACKED_REMINDER_NOTE)
+        return "\n\n".join([reply, *notes]) if notes else reply
 
     async def _render_memory(self, chat_jid_str: str, trigger_message: Message) -> str:
         """Blok memori pengguna untuk system prompt; gagal baca memori tidak menggagalkan balasan."""
