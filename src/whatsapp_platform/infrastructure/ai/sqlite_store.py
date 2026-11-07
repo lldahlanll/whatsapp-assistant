@@ -65,6 +65,15 @@ class AISQLiteStore:
             );
 
             CREATE INDEX IF NOT EXISTS idx_user_memory_scope ON user_memory (chat_id, user_id);
+
+            CREATE TABLE IF NOT EXISTS chat_summary (
+                chat_id TEXT PRIMARY KEY,
+                summary TEXT NOT NULL,
+                covered_until TEXT NOT NULL,
+                reset_marker TEXT NOT NULL DEFAULT '',
+                message_count INTEGER NOT NULL DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
             """
         )
         # Migrasi ringan untuk database lama yang belum punya kolom reset konteks
@@ -212,4 +221,42 @@ class AISQLiteStore:
             "INSERT INTO user_memory (chat_id, user_id, content) VALUES (?, ?, ?)",
             [(chat_id, user_id, entry) for entry in entries],
         )
+        await self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Chat summary (ringkasan berjalan per chat)
+    # ------------------------------------------------------------------
+
+    async def load_all_summaries(self) -> list[dict]:
+        if not self._conn:
+            raise RuntimeError("AISQLiteStore not initialized")
+        async with self._conn.execute(
+            "SELECT chat_id, summary, covered_until, reset_marker, message_count FROM chat_summary"
+        ) as cursor:
+            return [dict(row) for row in await cursor.fetchall()]
+
+    async def save_summary(
+        self, chat_id: str, summary: str, covered_until: str, reset_marker: str, message_count: int
+    ) -> None:
+        if not self._conn:
+            raise RuntimeError("AISQLiteStore not initialized")
+        await self._conn.execute(
+            """
+            INSERT INTO chat_summary (chat_id, summary, covered_until, reset_marker, message_count, updated_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(chat_id) DO UPDATE SET
+                summary = excluded.summary,
+                covered_until = excluded.covered_until,
+                reset_marker = excluded.reset_marker,
+                message_count = excluded.message_count,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (chat_id, summary, covered_until, reset_marker, message_count),
+        )
+        await self._conn.commit()
+
+    async def delete_summary(self, chat_id: str) -> None:
+        if not self._conn:
+            raise RuntimeError("AISQLiteStore not initialized")
+        await self._conn.execute("DELETE FROM chat_summary WHERE chat_id = ?", (chat_id,))
         await self._conn.commit()

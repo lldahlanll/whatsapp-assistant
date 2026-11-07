@@ -1,6 +1,6 @@
-"""AIChatCommandHandler for !ai commands (on, off, status, reset, model, stats, memori)."""
+"""AIChatCommandHandler for !ai commands (on, off, status, reset, model, stats, memori, ringkasan)."""
 
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import structlog
 
@@ -12,6 +12,9 @@ from whatsapp_platform.features.commands.context import CommandContext
 from whatsapp_platform.infrastructure.ai.ai_service import AIService
 from whatsapp_platform.infrastructure.ai.constants import ALL_SUPPORTED_MODELS, SUPPORTED_MODELS
 from whatsapp_platform.infrastructure.config.settings import Settings
+
+if TYPE_CHECKING:
+    from whatsapp_platform.features.ai.conversation_summary import ConversationSummarizer
 
 logger = structlog.get_logger()
 
@@ -45,7 +48,9 @@ class AIChatCommandHandler(BaseCommandHandler):
         ai_service: AIService,
         settings: Settings | None = None,
         memory_store: UserMemoryStore | None = None,
+        summarizer: "ConversationSummarizer | None" = None,
     ) -> None:
+        self._summarizer = summarizer
         self._config_store = config_store
         self._ai_service = ai_service
         self._memory_store = memory_store
@@ -86,6 +91,7 @@ class AIChatCommandHandler(BaseCommandHandler):
                 "• `!ai memori` - Lihat hal yang diingat AI tentangmu\n"
                 "• `!ai ingat <fakta>` - Minta AI mengingat sesuatu\n"
                 "• `!ai lupa <nomor|teks|semua>` - Hapus memori AI\n"
+                "• `!ai ringkasan` - Lihat ringkasan obrolan yang dipakai AI di chat ini\n"
                 "-----------------------------------"
             )
             return
@@ -121,6 +127,8 @@ class AIChatCommandHandler(BaseCommandHandler):
             await self._handle_memory_add(ctx, chat_jid_str, " ".join(args[1:]))
         elif sub_command == "lupa":
             await self._handle_memory_forget(ctx, chat_jid_str, " ".join(args[1:]))
+        elif sub_command in ("ringkasan", "summary"):
+            await self._handle_summary(ctx, chat_jid_str, args[1:])
         else:
             await ctx.reply(f"❌ Sub-command `!ai {sub_command}` tidak dikenali. Ketik `!ai` untuk bantuan.")
 
@@ -226,11 +234,34 @@ class AIChatCommandHandler(BaseCommandHandler):
         )
         await ctx.reply(text)
 
+    async def _handle_summary(self, ctx: CommandContext, chat_jid: str, rest: list[str]) -> None:
+        if self._summarizer is None:
+            await ctx.reply("ℹ️ Fitur ringkasan obrolan sedang dinonaktifkan.")
+            return
+        if rest and rest[0].lower() in ("hapus", "reset", "clear"):
+            if not self._is_admin(ctx.message):
+                await ctx.reply(_ADMIN_ONLY_TEXT)
+                return
+            await self._summarizer.clear(chat_jid)
+            await ctx.reply("🧹 Ringkasan obrolan di chat ini dihapus. AI akan membuat ringkasan baru seiring obrolan.")
+            return
+        config = await self._config_store.get(chat_jid)
+        summary = self._summarizer.get(chat_jid, config.context_reset_at)
+        if not summary:
+            await ctx.reply(
+                "ℹ️ Belum ada ringkasan obrolan di chat ini. Ringkasan dibuat otomatis setelah obrolan "
+                "cukup panjang."
+            )
+            return
+        await ctx.reply(f"*Ringkasan obrolan yang diingat AI:*\n\n{summary}")
+
     async def _handle_reset(self, ctx: CommandContext, chat_jid: str) -> None:
         # C7: !ai reset menandai waktu reset; AI mengabaikan history sebelum waktu ini.
         # Pesan di database WhatsApp tidak dihapus.
         await self._config_store.mark_context_reset(chat_jid)
         await self._ai_service.clear_context(chat_jid)
+        if self._summarizer is not None:
+            await self._summarizer.clear(chat_jid)
         await ctx.reply(
             "🧹 *Konteks Percakapan AI Di-reset*.\n"
             "Percakapan sebelumnya tidak lagi dipakai AI. (Pesan di database tetap tersimpan).\n"

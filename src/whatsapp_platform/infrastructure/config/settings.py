@@ -178,6 +178,19 @@ class Settings(BaseSettings):
     scheduler_poll_seconds: float = Field(
         default=20.0, ge=5.0, le=300.0, description="Interval (detik) pengecekan jadwal jatuh tempo"
     )
+    ai_summary_enabled: bool = Field(
+        default=True,
+        description="Ringkasan berjalan per chat: obrolan lama diringkas agar bot ingat konteks di luar riwayat pendek",
+    )
+    ai_summary_trigger_messages: int = Field(
+        default=8, ge=4, le=100, description="Jumlah pesan lama belum diringkas sebelum ringkasan diperbarui"
+    )
+    ai_summary_max_chars: int = Field(
+        default=600, ge=200, le=2000, description="Panjang maksimum ringkasan (ikut masuk system prompt)"
+    )
+    ai_summary_batch_max: int = Field(
+        default=40, ge=8, le=200, description="Maksimum pesan lama yang diringkas dalam sekali pembaruan"
+    )
     ai_voice_enabled: bool = Field(
         default=True,
         description="Transkripsi voice note (Groq Whisper) lalu diproses seperti pesan teks",

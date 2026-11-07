@@ -317,6 +317,22 @@ class Container(IContainer):
 
         self.register(CompositeToolExecutor, composite_executor)
 
+        from whatsapp_platform.features.ai.conversation_summary import ConversationSummarizer
+
+        summarizer: ConversationSummarizer | None = None
+        if self.settings.ai_summary_enabled:
+            summarizer = ConversationSummarizer(
+                ai_service=ai_service,
+                message_repo=message_repo,
+                db_store=ai_sqlite_store,
+                live_window=self.settings.ai_chat_history_limit,
+                trigger_messages=self.settings.ai_summary_trigger_messages,
+                batch_max=self.settings.ai_summary_batch_max,
+                max_chars=self.settings.ai_summary_max_chars,
+            )
+            await summarizer.initialize()
+        self.register(ConversationSummarizer, summarizer)
+
         ai_reply_uc = AIReplyUseCase(
             ai_service=ai_service,
             get_conv_uc=get_conv_uc,
@@ -324,6 +340,7 @@ class Container(IContainer):
             context_window_messages=self.settings.ai_context_window_messages,
             max_context_chars=self.settings.ai_max_context_chars,
             memory_store=memory_store,
+            summarizer=summarizer,
         )
 
         ai_config_store = AIChatConfigStore(
@@ -354,6 +371,12 @@ class Container(IContainer):
         if MikroTikRestClient in self._services:
             mikrotik_client: MikroTikRestClient = self.resolve(MikroTikRestClient)
             await mikrotik_client.aclose()
+
+        from whatsapp_platform.features.ai.conversation_summary import ConversationSummarizer
+
+        summarizer = self._services.get(ConversationSummarizer)
+        if summarizer is not None:
+            await summarizer.shutdown()  # selesaikan/batalkan update ringkasan sebelum SQLite ditutup
 
         if AISQLiteStore in self._services:
             ai_sqlite_store: AISQLiteStore = self.resolve(AISQLiteStore)

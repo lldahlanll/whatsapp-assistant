@@ -70,7 +70,10 @@ class CommandsFeature(IFeatureModule):
         from whatsapp_platform.features.ai.memory_store import UserMemoryStore
 
         memory_store = container.resolve(UserMemoryStore) if settings.ai_memory_enabled else None
-        router.register(AIChatCommandHandler(config_store, ai_service, settings, memory_store))
+        from whatsapp_platform.features.ai.conversation_summary import ConversationSummarizer
+
+        summarizer = container.resolve(ConversationSummarizer)
+        router.register(AIChatCommandHandler(config_store, ai_service, settings, memory_store, summarizer))
 
         from whatsapp_platform.features.commands.handlers.network import NetworkCommandHandler
         from whatsapp_platform.features.network.permission import NetworkPermissionChecker

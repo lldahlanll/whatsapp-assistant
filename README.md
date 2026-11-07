@@ -19,6 +19,7 @@ Platform **WhatsApp Assistant** production-grade berbasis **Python 3.12+** dan *
 - Automatic failover & key rotation antar provider
 - Rate limiting per-chat untuk mencegah abuse
 - Konteks percakapan multi-turn dengan history
+- **Ringkasan berjalan per chat**: obrolan lama diringkas otomatis (±600 karakter) agar AI tetap ingat konteks di luar riwayat pendek — lihat dengan `!ai ringkasan`, ikut terhapus saat `!ai reset`
 - Intent routing otomatis: chat, finance, network, vision
 - Support **image/vision analysis** (kirim gambar + pertanyaan)
 - Per-chat model override & konfigurasi
