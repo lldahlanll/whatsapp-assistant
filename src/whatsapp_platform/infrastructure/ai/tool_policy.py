@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from whatsapp_platform.infrastructure.ai.constants import TRANSFER_VERB_PATTERN
+from whatsapp_platform.infrastructure.ai.constants import BUDGET_TERMS, TRANSFER_VERB_PATTERN
 from whatsapp_platform.infrastructure.finance.tool_schema import FINANCE_TOOLS
 from whatsapp_platform.infrastructure.mikrotik.tool_schema import MIKROTIK_TOOLS, ToolDefinition
 
@@ -46,7 +46,7 @@ def select_tools(intent: IntentType, text: str) -> list[ToolDefinition] | None:
 
 def _select_finance_tools(lower: str) -> list[ToolDefinition]:
     """Select specific finance sub-tools based on message keywords."""
-    is_budget = any(kw in lower for kw in ("budget", "anggaran"))
+    is_budget = any(kw in lower for kw in BUDGET_TERMS)
     is_reset = any(kw in lower for kw in (
         "reset", "hapus semua", "bersihkan semua", "mulai dari nol",
         "hapus data keuangan", "hapus semua data", "reset keuangan", "reset finance",
@@ -111,7 +111,7 @@ def _select_finance_tools(lower: str) -> list[ToolDefinition]:
         # Tentukan lebih spesifik: hapus rekening vs hapus transaksi vs hapus budget
         if any(kw in lower for kw in ("rekening", "akun", "dompet", "kas")):
             names = ["finance_delete_account", "finance_get_accounts"]
-        elif any(kw in lower for kw in ("budget", "anggaran")):
+        elif any(kw in lower for kw in BUDGET_TERMS):
             names = ["finance_delete_budget", "finance_list_budgets"]
         else:
             names = [

@@ -216,10 +216,14 @@ _FINANCE_ACTION_VERBS = {
 TRANSFER_VERB_PATTERN = re.compile(r"\b(?:tf|pindah(?:kan)?|oper)\b", re.IGNORECASE)
 _TRANSFER_SHORTCUT = re.compile(r"\btf\b", re.IGNORECASE)
 
+# Termasuk salah ketik umum ("buget", "bujet") agar tool budget tetap dipilih.
+BUDGET_TERMS: tuple[str, ...] = ("budget", "buget", "bujet", "bugdet", "anggaran")
+
 FINANCE_KEYWORDS: set[str] = {
     "bayar", "beli", "saldo", "transfer", "pengeluaran", "pemasukan", "budget",
     "catat", "catet", "dompet", "keuangan", "utang", "cicilan", "gaji",
     "tabungan", "rekap", "uang", "duit", "rupiah", "pembayaran",
+    "buget", "bujet", "bugdet",
     "nota", "struk", "transaksi", "belanja", "anggaran", "kategori", "jual", "mutasi",
     "rekening", "akun", "top up", "topup", "isi saldo", "tambah saldo", "setor", "deposit",
     "harga", "nominal", "biaya", "tarif", "ongkir", "tagihan", "riwayat", "histori", "history", "laporan",

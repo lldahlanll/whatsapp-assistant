@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from whatsapp_platform.infrastructure.ai.claim_guard import UNBACKED_CLAIM_REPLY, is_unbacked_finance_claim
 from whatsapp_platform.infrastructure.ai.compact_formatter import compact_tool_result
 from whatsapp_platform.infrastructure.ai.constants import (
     DEFAULT_MODELS,
@@ -401,6 +402,13 @@ class AIService:
 
             # If LLM did not request any tool calls, return the final text response
             if not response.tool_calls:
+                if (
+                    iterations == 0
+                    and intent in ("finance", "full")
+                    and is_unbacked_finance_claim(user_text, response.text)
+                ):
+                    logger.warning("Blocked unbacked finance success claim", chat=chat_jid, intent=intent)
+                    response.text = UNBACKED_CLAIM_REPLY
                 return response
 
             # LLM requested tool execution(s)

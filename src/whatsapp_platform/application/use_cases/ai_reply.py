@@ -19,6 +19,7 @@ from whatsapp_platform.domain.value_objects.message_content import (
     TextContent,
 )
 from whatsapp_platform.infrastructure.ai.ai_service import AIService
+from whatsapp_platform.infrastructure.ai.claim_guard import UNBACKED_CLAIM_REPLY, is_unbacked_finance_claim
 from whatsapp_platform.infrastructure.ai.constants import (
     AI_IMAGE_DEFAULT_MIME_TYPE,
     AI_IMAGE_DEFAULT_PROMPT,
@@ -290,6 +291,10 @@ class AIReplyUseCase:
                 intent=policy.intent,
                 request_id=request_id,
             )
+            # Tanpa tool, klaim "berhasil dicatat" untuk pesan finance pasti karangan LLM.
+            if is_unbacked_finance_claim(trigger_text, response.text):
+                logger.warning("Blocked unbacked finance success claim", chat=chat_jid_str, intent=policy.intent)
+                response.text = UNBACKED_CLAIM_REPLY
 
         # 5. Persist trigger and AI reply to the context cache
         # Bytes gambar tidak disimpan ke konteks; cukup penanda teks.
