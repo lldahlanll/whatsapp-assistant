@@ -320,6 +320,8 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
                 select(func.count()).select_from(FinanceTransactionModel).where(
                     FinanceTransactionModel.owner_jid == owner_jid,
                     FinanceTransactionModel.category_id == category_id,
+                    # Transaksi yang sudah dihapus (soft delete) tidak menahan kategori.
+                    FinanceTransactionModel.deleted_at.is_(None),
                 )
             )
             budget_count = await session.scalar(

@@ -380,3 +380,31 @@ def test_reminder_tools_absent_when_disabled():
 
 def test_local_time_helper_sanity():
     assert to_local(NOW).hour == 10
+
+
+async def test_failed_state_save_after_claim_does_not_resend(svc, clock, sender, repo):
+    """Klaim sebelum kirim: gagal simpan -> pesan belum terkirim (bukan terkirim berulang)."""
+    await svc.create_task(OWNER, OWNER, message="x", delay_minutes=1)
+    clock.now = NOW + timedelta(minutes=2)
+    original = repo.save_run_state
+    repo.save_run_state = AsyncMock(side_effect=RuntimeError("database is locked"))
+    assert await svc.run_due() == 0
+    sender.assert_not_awaited()
+    repo.save_run_state = original
+    assert await svc.run_due() == 1
+    assert await svc.run_due() == 0
+    assert sender.await_count == 1
+
+
+async def test_send_failure_restores_schedule_for_retry(svc, clock, sender, repo):
+    await svc.create_task(OWNER, OWNER, message="Harian", recurrence="daily", time_of_day="12:00")
+    clock.now = wib(2026, 11, 6, 12, 0, 5)
+    sender.side_effect = RuntimeError("offline")
+    await svc.run_due()
+    [task] = await repo.list_active(OWNER)
+    assert task.next_run_at == wib(2026, 11, 6, 12, 0) and task.run_count == 0 and task.fail_count == 1
+    sender.side_effect = None
+    assert await svc.run_due() == 1
+    [task] = await repo.list_active(OWNER)
+    assert task.next_run_at == wib(2026, 11, 7, 12, 0) and task.run_count == 1 and task.fail_count == 0
+

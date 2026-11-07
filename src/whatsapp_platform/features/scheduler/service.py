@@ -269,40 +269,57 @@ class SchedulerService:
         return sent
 
     async def _run_task(self, task: ScheduledTask, now: datetime) -> bool:
+        """Klaim dulu (majukan jadwal di DB), baru kirim.
+
+        Jika simpan status gagal setelah pesan terkirim, urutan sebaliknya membuat pesan yang sama
+        terkirim ulang tiap putaran. Lebih baik satu pengingat hilang daripada spam berulang.
+        """
         overdue = now - task.next_run_at
+        due_at, prev_active, prev_fail, prev_last = task.next_run_at, task.is_active, task.fail_count, task.last_run_at
         stale = task.recurrence != Recurrence.ONCE and overdue > STALE_AFTER
 
-        sent = False
+        text: str | None = None
         if stale:
             logger.info("Skipping stale scheduled occurrence", task=task.id, overdue=str(overdue))
         else:
             try:
                 text = await self._render(task, overdue)
-                if self._send is None:
-                    raise RuntimeError("Scheduler sender not configured")
-                await self._send(task.chat_jid, text)
-                sent = True
-            except Exception as exc:  # noqa: BLE001 — gagal kirim apa pun dicoba ulang, bukan crash
-                task.fail_count += 1
-                logger.warning(
-                    "Scheduled task send failed", task=task.id, attempt=task.fail_count, error=str(exc)
-                )
-                if task.fail_count < MAX_SEND_FAILURES:
-                    await self._repo.save_run_state(task)
-                    return False
-                logger.error("Scheduled task gave up after repeated failures", task=task.id)
+            except Exception as exc:  # noqa: BLE001 — gagal render dicoba ulang seperti gagal kirim
+                return await self._record_failure(task, exc)
 
-        if sent:
+        nxt = advance_past(due_at, now, task.recurrence, task.anchor_day)
+        task.is_active = nxt is not None
+        task.next_run_at = nxt or due_at
+        task.fail_count = 0
+        if text is not None:
             task.run_count += 1
             task.last_run_at = now
-        task.fail_count = 0
-        nxt = advance_past(task.next_run_at, now, task.recurrence, task.anchor_day)
-        if nxt is None:
-            task.is_active = False
-        else:
-            task.next_run_at = nxt
+        await self._repo.save_run_state(task)  # klaim; gagal di sini -> belum terkirim, aman diulang
+        if text is None:
+            return False
+
+        try:
+            if self._send is None:
+                raise RuntimeError("Scheduler sender not configured")
+            await self._send(task.chat_jid, text)
+            return True
+        except Exception as exc:  # noqa: BLE001 — gagal kirim apa pun dicoba ulang, bukan crash
+            # Kembalikan ke kejadian yang gagal agar dicoba lagi di putaran berikutnya.
+            task.next_run_at, task.is_active, task.fail_count = due_at, prev_active, prev_fail
+            task.run_count, task.last_run_at = task.run_count - 1, prev_last
+            return await self._record_failure(task, exc)
+
+    async def _record_failure(self, task: ScheduledTask, exc: Exception) -> bool:
+        task.fail_count += 1
+        logger.warning("Scheduled task send failed", task=task.id, attempt=task.fail_count, error=str(exc))
+        if task.fail_count >= MAX_SEND_FAILURES:
+            logger.error("Scheduled task gave up after repeated failures", task=task.id)
+            nxt = advance_past(task.next_run_at, self.now(), task.recurrence, task.anchor_day)
+            task.is_active = nxt is not None
+            task.next_run_at = nxt or task.next_run_at
+            task.fail_count = 0
         await self._repo.save_run_state(task)
-        return sent
+        return False
 
     async def _render(self, task: ScheduledTask, overdue: timedelta) -> str:
         if task.kind == TaskKind.FINANCE_REPORT:

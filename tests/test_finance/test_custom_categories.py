@@ -192,3 +192,11 @@ def test_create_category_has_no_fast_path_so_llm_can_chain_budget():
 def test_tool_routing(text, expected):
     names = {t.name for t in _select_finance_tools(text)}
     assert expected in names
+
+
+async def test_soft_deleted_transactions_do_not_block_category_delete(svc):
+    await svc.create_category(OWNER, "Parfum", "expense")
+    tx = await svc.add_expense(OWNER, Decimal("10000"), category_name="Parfum")
+    await svc.delete_transaction(OWNER, tx.human_tx_id or tx.id)
+    deleted = await svc.delete_category(OWNER, "Parfum")
+    assert deleted.name == "Parfum"
