@@ -81,13 +81,15 @@ async def api_client():
         debug=True,
         session_name="test-session",
         database_url="sqlite+aiosqlite:///:memory:",
-        api_key="",  # Auth disabled for tests
+        api_key="test-key",
     )
 
     container = MockContainer(settings, session_factory)
     app = create_api_app(container)
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test", headers={"X-API-Key": "test-key"}
+    ) as client:
         yield client
 
     await engine.dispose()

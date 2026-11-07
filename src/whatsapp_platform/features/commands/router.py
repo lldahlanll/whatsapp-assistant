@@ -134,4 +134,4 @@ class CommandRouter:
             logger.error(
                 "Error executing command handler", command=command.name, error=str(exc), exc_info=True
             )
-            await ctx.reply(f"❌ Error executing command '{command.name}': {exc}")
+            await ctx.reply(f"❌ Terjadi kesalahan saat menjalankan perintah '{command.name}'. Coba lagi nanti.")

@@ -10,6 +10,7 @@ from whatsapp_platform.domain.entities.finance import (
     BudgetProgress,
     CategorySummary,
     FinanceAccount,
+    FinanceAuditEntry,
     FinanceBudget,
     FinanceCategory,
     FinanceTransaction,
@@ -49,6 +50,14 @@ class IFinanceRepository(ABC):
         self, owner_jid: str, name: str
     ) -> FinanceCategory | None: ...
 
+    @abstractmethod
+    async def count_category_usage(self, owner_jid: str, category_id: str) -> dict[str, int]:
+        """Jumlah transaksi & budget yang memakai kategori: {'transactions': n, 'budgets': n}."""
+        ...
+
+    @abstractmethod
+    async def delete_category(self, owner_jid: str, category_id: str) -> bool: ...
+
     # ── Transactions ──────────────────────────────────────────────────────────
 
     @abstractmethod
@@ -56,18 +65,28 @@ class IFinanceRepository(ABC):
 
     @abstractmethod
     async def save_transaction_atomic(
-        self, transaction: FinanceTransaction, balance_updates: dict[str, Decimal]
-    ) -> FinanceTransaction: ...
+        self, transaction: FinanceTransaction, balance_deltas: dict[str, Decimal]
+    ) -> FinanceTransaction:
+        """Simpan transaksi dan tambahkan delta ke saldo tiap rekening dalam satu transaksi DB.
+
+        Raises FinanceBalanceConflictError bila rekening tidak ada atau saldo akan minus.
+        """
 
     @abstractmethod
     async def reverse_transaction_atomic(
-        self, original_tx_id: str, owner_jid: str, reversal_tx: FinanceTransaction, balance_updates: dict[str, Decimal]
-    ) -> FinanceTransaction: ...
+        self, original_tx_id: str, owner_jid: str, reversal_tx: FinanceTransaction, balance_deltas: dict[str, Decimal]
+    ) -> FinanceTransaction:
+        """Tandai transaksi asli reversed, simpan reversal, dan terapkan delta saldo secara atomik.
+
+        Raises FinanceTransactionConflictError bila transaksi asli sudah di-reverse,
+        FinanceBalanceConflictError bila saldo akan minus.
+        """
 
     @abstractmethod
     async def update_transaction_atomic(
-        self, transaction: FinanceTransaction, balance_updates: dict[str, Decimal]
-    ) -> FinanceTransaction: ...
+        self, transaction: FinanceTransaction, balance_deltas: dict[str, Decimal]
+    ) -> FinanceTransaction:
+        """Perbarui transaksi dan terapkan delta saldo secara atomik (lihat save_transaction_atomic)."""
 
     @abstractmethod
     async def get_transaction_by_id(self, tx_id: str, owner_jid: str) -> FinanceTransaction | None: ...
@@ -152,6 +171,16 @@ class IFinanceRepository(ABC):
     ) -> bool: ...
 
     @abstractmethod
+    async def carry_over_recurring_budgets(
+        self, owner_jid: str, month: int, year: int
+    ) -> int:
+        """Salin budget berulang dari bulan sebelumnya ke (month, year) bila belum ada.
+
+        Return jumlah budget yang dibuat.
+        """
+        ...
+
+    @abstractmethod
     async def get_budget_progress(
         self, owner_jid: str, category_id: str, month: int, year: int
     ) -> BudgetProgress | None: ...
@@ -173,3 +202,10 @@ class IFinanceRepository(ABC):
         """
         ...
 
+
+    @abstractmethod
+    async def get_audit_log(
+        self, owner_jid: str, limit: int = 20, entity_type: str | None = None
+    ) -> list[FinanceAuditEntry]:
+        """Riwayat data finance yang dihapus (terbaru dulu)."""
+        ...

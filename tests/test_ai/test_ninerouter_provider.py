@@ -82,6 +82,7 @@ async def test_ninerouter_provider_basic_generation() -> None:
     assert headers["X-Title"] == "WhatsApp Platform AI"
     payload = call_args.kwargs["json"]
     assert payload["model"] == "chat-pool"
+    assert payload["stream"] is False  # 9router default-nya SSE; klien butuh satu JSON
     assert len(payload["messages"]) == 2
 
 
@@ -140,6 +141,7 @@ async def test_ninerouter_provider_tool_calling() -> None:
     call_kwargs = mock_client.post.call_args.kwargs
     payload = call_kwargs["json"]
     assert payload["model"] == "tools-pool"
+    assert payload["stream"] is False
     assert "tools" in payload
     assert payload["tool_choice"] == "auto"
 

@@ -46,6 +46,7 @@ docs/
 assets/
 scratch/
 scripts/
+!scripts/reconcile_finance.py
 
 # Deployment config (not needed inside container)
 deployment/

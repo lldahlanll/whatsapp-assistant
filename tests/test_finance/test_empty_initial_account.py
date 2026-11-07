@@ -1,5 +1,6 @@
 """Test kasus start awal rekening kosong dan penanganan saldo."""
 
+from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
@@ -120,8 +121,7 @@ async def test_finance_command_tambah_and_topup_alias(
     saved_tx.category_name = "Lainnya"
     saved_tx.description = "Freelance"
     saved_tx.transaction_type = MagicMock()
-    saved_tx.transaction_date = MagicMock()
-    saved_tx.transaction_date.strftime.return_value = "10 Sep 2026"
+    saved_tx.transaction_date = datetime(2026, 9, 10, 3, 0, tzinfo=UTC)
     mock_repo.save_transaction_atomic.return_value = saved_tx
 
     handler = FinanceCommandHandler(svc)
@@ -129,6 +129,7 @@ async def test_finance_command_tambah_and_topup_alias(
     # Test !finance tambah 100rb freelance BCA
     ctx = MagicMock()
     ctx.message.sender_jid = owner_jid
+    ctx.message.chat_jid.is_group = False
     ctx.command.args = ["tambah", "100rb", "freelance", "BCA"]
     ctx.reply = AsyncMock()
 

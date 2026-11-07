@@ -73,8 +73,8 @@ async def test_income_adds_to_balance_atomically(mock_repo: AsyncMock, owner_jid
 
     assert result.amount == Decimal("50000")
     mock_repo.save_transaction_atomic.assert_called_once()
-    balance_updates = mock_repo.save_transaction_atomic.call_args[0][1]
-    assert balance_updates == {cash_acc.id: Decimal("150000")}
+    balance_deltas = mock_repo.save_transaction_atomic.call_args[0][1]
+    assert balance_deltas == {cash_acc.id: Decimal("50000")}
 
 
 @pytest.mark.asyncio
@@ -118,8 +118,8 @@ async def test_expense_deducts_balance_atomically(mock_repo: AsyncMock, owner_ji
     )
 
     assert result.amount == Decimal("35000")
-    balance_updates = mock_repo.save_transaction_atomic.call_args[0][1]
-    assert balance_updates == {cash_acc.id: Decimal("65000")}
+    balance_deltas = mock_repo.save_transaction_atomic.call_args[0][1]
+    assert balance_deltas == {cash_acc.id: Decimal("-35000")}
 
 
 @pytest.mark.asyncio
@@ -206,11 +206,11 @@ async def test_transfer_preserves_total_net_worth(mock_repo: AsyncMock, owner_ji
     )
 
     assert result.amount == Decimal("500000")
-    balance_updates = mock_repo.save_transaction_atomic.call_args[0][1]
-    assert balance_updates[bca_acc.id] == Decimal("500000")
-    assert balance_updates[gopay_acc.id] == Decimal("700000")
-    # Total net worth invariant check: (1,000,000 + 200,000) == (500,000 + 700,000)
-    assert (bca_acc.balance + gopay_acc.balance) == (balance_updates[bca_acc.id] + balance_updates[gopay_acc.id])
+    balance_deltas = mock_repo.save_transaction_atomic.call_args[0][1]
+    assert balance_deltas[bca_acc.id] == Decimal("-500000")
+    assert balance_deltas[gopay_acc.id] == Decimal("500000")
+    # Total net worth invariant: transfer tidak mengubah total saldo
+    assert sum(balance_deltas.values()) == 0
 
 
 @pytest.mark.asyncio
@@ -312,9 +312,9 @@ async def test_reversal_restores_balances_and_marks_original_reversed(mock_repo:
 
     assert result.reversal_of_id == orig_tx.id
     mock_repo.reverse_transaction_atomic.assert_called_once()
-    balance_updates = mock_repo.reverse_transaction_atomic.call_args[1]["balance_updates"]
-    # 450,000 + 50,000 == 500,000
-    assert balance_updates[acc.id] == Decimal("500000")
+    balance_deltas = mock_repo.reverse_transaction_atomic.call_args[1]["balance_deltas"]
+    # Reversal expense 50,000 mengembalikan saldo
+    assert balance_deltas[acc.id] == Decimal("50000")
 
 
 @pytest.mark.asyncio
@@ -378,7 +378,7 @@ async def test_correct_expense_updates_in_place_and_adjusts_balance(mock_repo: A
     mock_repo.get_transaction_by_id.return_value = orig_tx
     mock_repo.get_account_by_id.return_value = acc
 
-    def fake_update(transaction, balance_updates):
+    def fake_update(transaction, balance_deltas):
         return transaction
 
     mock_repo.update_transaction_atomic.side_effect = fake_update
@@ -397,9 +397,9 @@ async def test_correct_expense_updates_in_place_and_adjusts_balance(mock_repo: A
     assert result.description == "Makan siang hemat"
 
     mock_repo.update_transaction_atomic.assert_called_once()
-    balance_updates = mock_repo.update_transaction_atomic.call_args[1]["balance_updates"]
-    # 450,000 + (50,000 - 20,000) = 480,000
-    assert balance_updates[acc.id] == Decimal("480000")
+    balance_deltas = mock_repo.update_transaction_atomic.call_args[1]["balance_deltas"]
+    # 50,000 - 20,000 = refund 30,000
+    assert balance_deltas[acc.id] == Decimal("30000")
 
 
 @pytest.mark.asyncio
@@ -434,7 +434,7 @@ async def test_correct_expense_increase_adjusts_balance(mock_repo: AsyncMock, ow
     mock_repo.get_transaction_by_id.return_value = orig_tx
     mock_repo.get_account_by_id.return_value = acc
 
-    mock_repo.update_transaction_atomic.side_effect = lambda transaction, balance_updates: transaction
+    mock_repo.update_transaction_atomic.side_effect = lambda transaction, balance_deltas: transaction
 
     # Edit from 50,000 to 80,000 (deduct extra 30,000)
     result = await svc.correct_transaction(
@@ -444,9 +444,9 @@ async def test_correct_expense_increase_adjusts_balance(mock_repo: AsyncMock, ow
     )
 
     assert result.amount == Decimal("80000")
-    balance_updates = mock_repo.update_transaction_atomic.call_args[1]["balance_updates"]
-    # 450,000 - 30,000 = 420,000
-    assert balance_updates[acc.id] == Decimal("420000")
+    balance_deltas = mock_repo.update_transaction_atomic.call_args[1]["balance_deltas"]
+    # Tambahan potongan 30,000
+    assert balance_deltas[acc.id] == Decimal("-30000")
 
 
 @pytest.mark.asyncio

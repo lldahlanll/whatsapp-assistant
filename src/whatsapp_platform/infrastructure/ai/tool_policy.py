@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from whatsapp_platform.infrastructure.ai.constants import TRANSFER_VERB_PATTERN
+from whatsapp_platform.infrastructure.ai.constants import BUDGET_TERMS, TRANSFER_VERB_PATTERN
 from whatsapp_platform.infrastructure.finance.tool_schema import FINANCE_TOOLS
 from whatsapp_platform.infrastructure.mikrotik.tool_schema import MIKROTIK_TOOLS, ToolDefinition
 
@@ -46,7 +46,7 @@ def select_tools(intent: IntentType, text: str) -> list[ToolDefinition] | None:
 
 def _select_finance_tools(lower: str) -> list[ToolDefinition]:
     """Select specific finance sub-tools based on message keywords."""
-    is_budget = any(kw in lower for kw in ("budget", "anggaran"))
+    is_budget = any(kw in lower for kw in BUDGET_TERMS)
     is_reset = any(kw in lower for kw in (
         "reset", "hapus semua", "bersihkan semua", "mulai dari nol",
         "hapus data keuangan", "hapus semua data", "reset keuangan", "reset finance",
@@ -84,16 +84,27 @@ def _select_finance_tools(lower: str) -> list[ToolDefinition]:
         "yakin", "benar", "betul", "setuju", "hapus"
     ))
     is_kategori_query = any(kw in lower for kw in ("kategori", "kategori apa"))
+    is_category_manage = "kategori" in lower and any(kw in lower for kw in (
+        "tambah", "buat", "bikin", "baru", "hapus", "buang",
+    ))
 
     names: list[str] = []
 
-    if is_confirmation:
+    # Sebelum is_confirmation: "hapus kategori kopi" memuat kata "hapus" (juga kata konfirmasi).
+    if is_category_manage:
+        names = ["finance_create_category", "finance_delete_category", "finance_get_categories"]
+        if is_budget:
+            names += ["finance_create_budget", "finance_list_budgets"]
+    elif is_confirmation:
         names = [
             "finance_delete_account",
             "finance_delete_transaction",
             "finance_reset_data",
             "finance_get_accounts",
             "finance_get_balance",
+            # "iya, buatkan" setelah bot menawarkan kategori baru (lalu budget-nya).
+            "finance_create_category",
+            "finance_create_budget",
         ]
     elif is_reset:
         names = ["finance_reset_data"]
@@ -106,12 +117,13 @@ def _select_finance_tools(lower: str) -> list[ToolDefinition]:
             "finance_list_budgets",
             "finance_delete_budget",
             "finance_get_categories",
+            "finance_create_category",
         ]
     elif is_modify_or_delete:
         # Tentukan lebih spesifik: hapus rekening vs hapus transaksi vs hapus budget
         if any(kw in lower for kw in ("rekening", "akun", "dompet", "kas")):
             names = ["finance_delete_account", "finance_get_accounts"]
-        elif any(kw in lower for kw in ("budget", "anggaran")):
+        elif any(kw in lower for kw in BUDGET_TERMS):
             names = ["finance_delete_budget", "finance_list_budgets"]
         else:
             names = [

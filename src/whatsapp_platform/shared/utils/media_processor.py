@@ -7,6 +7,11 @@ import structlog
 logger = structlog.get_logger()
 
 
+# Batas piksel gambar (~50 MP). File kecil dengan resolusi raksasa (decompression bomb) ditolak sebelum
+# di-decode penuh; Pillow melempar DecompressionBombError di atas 2x batas ini.
+MAX_IMAGE_PIXELS = 50_000_000
+
+
 class MediaProcessor:
     """Helper service for processing media attachments."""
 
@@ -24,7 +29,12 @@ class MediaProcessor:
         try:
             from PIL import Image
 
+            Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
             img: Image.Image = Image.open(io.BytesIO(image_bytes))
+            if img.width * img.height > MAX_IMAGE_PIXELS:
+                # Jangan decode gambar raksasa; kembalikan apa adanya (ukuran file sudah dibatasi pemanggil).
+                logger.warning("Image too large to process", width=img.width, height=img.height)
+                return image_bytes
 
             # Convert RGBA to RGB if saving as JPEG
             if img.mode in ("RGBA", "P") and output_format.upper() == "JPEG":

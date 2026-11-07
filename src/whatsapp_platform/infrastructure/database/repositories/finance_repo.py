@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
+from datetime import date as date_type
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from whatsapp_platform.domain.entities.finance import (
@@ -15,19 +22,26 @@ from whatsapp_platform.domain.entities.finance import (
     CategorySummary,
     CategoryType,
     FinanceAccount,
+    FinanceAuditEntry,
     FinanceBudget,
     FinanceCategory,
     FinanceTransaction,
     MonthlySummary,
     TransactionType,
 )
+from whatsapp_platform.domain.exceptions import (
+    FinanceBalanceConflictError,
+    FinanceTransactionConflictError,
+)
 from whatsapp_platform.domain.repositories.finance_repository import IFinanceRepository
 from whatsapp_platform.infrastructure.database.models import (
     FinanceAccountModel,
+    FinanceAuditLogModel,
     FinanceBudgetModel,
     FinanceCategoryModel,
     FinanceTransactionModel,
 )
+from whatsapp_platform.shared.utils.timezone import day_bounds_utc, month_bounds_utc
 
 
 def _calculate_budget_status(percentage: float) -> str:
@@ -56,6 +70,7 @@ def _budget_from_model(
         updated_at=m.updated_at,
         category_name=category_name,
         category_icon=category_icon,
+        is_recurring=bool(m.is_recurring),
     )
 
 
@@ -114,9 +129,46 @@ def _transaction_from_model(
     )
 
 
+def _row_snapshot(model: Any, **extra: Any) -> dict[str, Any]:
+    """Salin semua kolom baris ORM ke dict yang aman untuk JSON (Decimal/datetime -> str)."""
+    data = {c.key: getattr(model, c.key) for c in model.__mapper__.column_attrs}
+    data.update(extra)
+    return json.loads(json.dumps(data, default=str))
+
+
+def _add_audit(
+    session: AsyncSession,
+    owner_jid: str,
+    entity_type: str,
+    entity_id: str | None,
+    action: str,
+    summary: str,
+    snapshot: dict[str, Any],
+) -> None:
+    """Tambah catatan audit ke session yang sama dengan penghapusan (satu transaksi DB)."""
+    session.add(
+        FinanceAuditLogModel(
+            id=str(uuid.uuid4()),
+            owner_jid=owner_jid,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            action=action,
+            summary=summary,
+            snapshot=json.dumps(snapshot, ensure_ascii=False),
+            created_at=datetime.now(UTC),
+        )
+    )
+
+
 class SQLAlchemyFinanceRepository(IFinanceRepository):
-    def __init__(self, session_factory: Any) -> None:
+    def __init__(
+        self,
+        session_factory: Any,
+        pre_destructive_snapshot: Callable[[str], Path | None] | None = None,
+    ) -> None:
         self._session_factory = session_factory
+        # Dipanggil sebelum operasi yang tidak bisa dibatalkan (reset); gagal = operasi dibatalkan.
+        self._pre_destructive_snapshot = pre_destructive_snapshot
 
     def _session(self) -> AsyncSession:
         return self._session_factory()
@@ -153,11 +205,13 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
             return [_account_from_model(m) for m in result.scalars().all()]
 
     async def get_account_by_id(self, account_id: str, owner_jid: str) -> FinanceAccount | None:
+        """Ambil rekening AKTIF milik owner; rekening yang sudah dihapus tidak bisa dipakai lagi."""
         async with self._session() as session:
             result = await session.execute(
                 select(FinanceAccountModel).where(
                     FinanceAccountModel.id == account_id,
                     FinanceAccountModel.owner_jid == owner_jid,
+                    FinanceAccountModel.is_active.is_(True),
                 )
             )
             m = result.scalar_one_or_none()
@@ -186,6 +240,11 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
             if not m:
                 return False
             m.is_active = False
+            _add_audit(
+                session, owner_jid, "account", m.id, "delete",
+                f"Rekening {m.name} ({m.account_type}), saldo {m.balance}",
+                _row_snapshot(m),
+            )
             await session.commit()
             return True
 
@@ -203,9 +262,32 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
                 created_at=category.created_at,
             )
             session.add(model)
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError:
+                # Seed bersamaan: kategori yang sama sudah dibuat proses lain -> pakai yang ada.
+                await session.rollback()
+                existing = await self._get_category_exact(
+                    session, category.owner_jid, category.category_type.value, category.name
+                )
+                if existing is None:
+                    raise
+                return _category_from_model(existing)
             await session.refresh(model)
             return _category_from_model(model)
+
+    @staticmethod
+    async def _get_category_exact(
+        session: AsyncSession, owner_jid: str, category_type: str, name: str
+    ) -> FinanceCategoryModel | None:
+        result = await session.execute(
+            select(FinanceCategoryModel).where(
+                FinanceCategoryModel.owner_jid == owner_jid,
+                FinanceCategoryModel.category_type == category_type,
+                FinanceCategoryModel.name == name,
+            )
+        )
+        return result.scalars().first()
 
     async def get_categories(self, owner_jid: str) -> list[FinanceCategory]:
         async with self._session() as session:
@@ -225,9 +307,51 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
                     FinanceCategoryModel.owner_jid == owner_jid,
                     func.lower(FinanceCategoryModel.name) == name.lower(),
                 )
+                # Toleran terhadap duplikat lama: ambil yang paling awal, jangan error.
+                .order_by(FinanceCategoryModel.created_at, FinanceCategoryModel.id)
+                .limit(1)
             )
-            m = result.scalar_one_or_none()
+            m = result.scalars().first()
             return _category_from_model(m) if m else None
+
+    async def count_category_usage(self, owner_jid: str, category_id: str) -> dict[str, int]:
+        async with self._session() as session:
+            tx_count = await session.scalar(
+                select(func.count()).select_from(FinanceTransactionModel).where(
+                    FinanceTransactionModel.owner_jid == owner_jid,
+                    FinanceTransactionModel.category_id == category_id,
+                    # Transaksi yang sudah dihapus (soft delete) tidak menahan kategori.
+                    FinanceTransactionModel.deleted_at.is_(None),
+                )
+            )
+            budget_count = await session.scalar(
+                select(func.count()).select_from(FinanceBudgetModel).where(
+                    FinanceBudgetModel.owner_jid == owner_jid,
+                    FinanceBudgetModel.category_id == category_id,
+                )
+            )
+            return {"transactions": int(tx_count or 0), "budgets": int(budget_count or 0)}
+
+    async def delete_category(self, owner_jid: str, category_id: str) -> bool:
+        async with self._session() as session:
+            model = (
+                await session.execute(
+                    select(FinanceCategoryModel).where(
+                        FinanceCategoryModel.id == category_id,
+                        FinanceCategoryModel.owner_jid == owner_jid,
+                    )
+                )
+            ).scalar_one_or_none()
+            if not model:
+                return False
+            _add_audit(
+                session, owner_jid, "category", model.id, "delete",
+                f"Kategori {model.category_type} '{model.name}'",
+                _row_snapshot(model),
+            )
+            await session.delete(model)
+            await session.commit()
+            return True
 
     # ── Transactions ──────────────────────────────────────────────────────────
 
@@ -255,7 +379,23 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
             return _transaction_from_model(model)
 
     async def save_transaction_atomic(
-        self, transaction: FinanceTransaction, balance_updates: dict[str, Decimal]
+        self, transaction: FinanceTransaction, balance_deltas: dict[str, Decimal]
+    ) -> FinanceTransaction:
+        try:
+            return await self._save_transaction_atomic(transaction, balance_deltas)
+        except IntegrityError:
+            # Pesan yang sama diproses bersamaan: unique index idempotency_key menolak yang kedua.
+            # Transaksi & perubahan saldo kedua sudah di-rollback; kembalikan yang pertama.
+            if transaction.idempotency_key:
+                existing = await self.get_transaction_by_idempotency_key(
+                    transaction.owner_jid, transaction.idempotency_key
+                )
+                if existing is not None:
+                    return existing
+            raise
+
+    async def _save_transaction_atomic(
+        self, transaction: FinanceTransaction, balance_deltas: dict[str, Decimal]
     ) -> FinanceTransaction:
         async with self._session() as session:
             async with session.begin():
@@ -276,13 +416,8 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
                     created_at=transaction.created_at,
                 )
                 session.add(model)
-                for acc_id, new_bal in balance_updates.items():
-                    acc_result = await session.execute(
-                        select(FinanceAccountModel).where(FinanceAccountModel.id == acc_id)
-                    )
-                    acc_m = acc_result.scalar_one_or_none()
-                    if acc_m:
-                        acc_m.balance = new_bal
+                await session.flush()  # INSERT lebih dulu: bentrok idempotency terdeteksi sebelum saldo berubah
+                await self._apply_balance_deltas(session, transaction.owner_jid, balance_deltas)
 
             await session.refresh(model)
             return _transaction_from_model(
@@ -294,19 +429,32 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
             )
 
     async def reverse_transaction_atomic(
-        self, original_tx_id: str, owner_jid: str, reversal_tx: FinanceTransaction, balance_updates: dict[str, Decimal]
+        self, original_tx_id: str, owner_jid: str, reversal_tx: FinanceTransaction, balance_deltas: dict[str, Decimal]
     ) -> FinanceTransaction:
         async with self._session() as session:
             async with session.begin():
+                # Conditional update: dua reversal bersamaan hanya satu yang lolos.
                 orig_result = await session.execute(
-                    select(FinanceTransactionModel).where(
+                    update(FinanceTransactionModel)
+                    .where(
                         FinanceTransactionModel.id == original_tx_id,
                         FinanceTransactionModel.owner_jid == owner_jid,
+                        FinanceTransactionModel.is_reversed.is_(False),
+                        FinanceTransactionModel.reversal_of_id.is_(None),
+                        # Data yang dipakai menghitung delta harus masih sama (bukan hasil edit bersamaan).
+                        FinanceTransactionModel.amount == reversal_tx.amount,
+                        FinanceTransactionModel.account_id == reversal_tx.account_id,
+                        (
+                            FinanceTransactionModel.transfer_to_account_id.is_(None)
+                            if reversal_tx.transfer_to_account_id is None
+                            else FinanceTransactionModel.transfer_to_account_id
+                            == reversal_tx.transfer_to_account_id
+                        ),
                     )
+                    .values(is_reversed=True)
                 )
-                orig_m = orig_result.scalar_one_or_none()
-                if orig_m:
-                    orig_m.is_reversed = True
+                if orig_result.rowcount != 1:
+                    raise FinanceTransactionConflictError(original_tx_id)
 
                 rev_model = FinanceTransactionModel(
                     id=reversal_tx.id,
@@ -325,13 +473,7 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
                     created_at=reversal_tx.created_at,
                 )
                 session.add(rev_model)
-                for acc_id, new_bal in balance_updates.items():
-                    acc_result = await session.execute(
-                        select(FinanceAccountModel).where(FinanceAccountModel.id == acc_id)
-                    )
-                    acc_m = acc_result.scalar_one_or_none()
-                    if acc_m:
-                        acc_m.balance = new_bal
+                await self._apply_balance_deltas(session, owner_jid, balance_deltas)
 
             await session.refresh(rev_model)
             return _transaction_from_model(
@@ -343,36 +485,48 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
             )
 
     async def update_transaction_atomic(
-        self, transaction: FinanceTransaction, balance_updates: dict[str, Decimal]
+        self, transaction: FinanceTransaction, balance_deltas: dict[str, Decimal]
     ) -> FinanceTransaction:
         async with self._session() as session:
             async with session.begin():
-                result = await session.execute(
-                    select(FinanceTransactionModel).where(
-                        (FinanceTransactionModel.id == transaction.id)
-                        | (FinanceTransactionModel.human_tx_id == transaction.human_tx_id),
-                        FinanceTransactionModel.owner_jid == transaction.owner_jid,
-                    )
-                )
-                model = result.scalar_one_or_none()
-                if not model:
-                    raise ValueError(f"Transaction '{transaction.id}' not found for update.")
-
-                model.amount = transaction.amount
-                model.description = transaction.description
-                model.category_id = transaction.category_id
-                model.account_id = transaction.account_id
-                model.transfer_to_account_id = transaction.transfer_to_account_id
+                values: dict[str, Any] = {
+                    "amount": transaction.amount,
+                    "description": transaction.description,
+                    "category_id": transaction.category_id,
+                    "account_id": transaction.account_id,
+                    "transfer_to_account_id": transaction.transfer_to_account_id,
+                }
                 if transaction.transaction_date:
-                    model.transaction_date = transaction.transaction_date
+                    values["transaction_date"] = transaction.transaction_date
 
-                for acc_id, new_bal in balance_updates.items():
-                    acc_result = await session.execute(
-                        select(FinanceAccountModel).where(FinanceAccountModel.id == acc_id)
+                # Conditional update: transaksi yang sudah di-reverse (atau baris reversal) tidak boleh diedit.
+                updated = await session.execute(
+                    update(FinanceTransactionModel)
+                    .where(
+                        FinanceTransactionModel.id == transaction.id,
+                        FinanceTransactionModel.owner_jid == transaction.owner_jid,
+                        FinanceTransactionModel.is_reversed.is_(False),
+                        FinanceTransactionModel.reversal_of_id.is_(None),
                     )
-                    acc_m = acc_result.scalar_one_or_none()
-                    if acc_m:
-                        acc_m.balance = new_bal
+                    .values(**values)
+                )
+                if updated.rowcount != 1:  # type: ignore[attr-defined]
+                    exists = await session.execute(
+                        select(FinanceTransactionModel.id).where(
+                            FinanceTransactionModel.id == transaction.id,
+                            FinanceTransactionModel.owner_jid == transaction.owner_jid,
+                        )
+                    )
+                    if exists.scalar_one_or_none() is None:
+                        raise ValueError(f"Transaction '{transaction.id}' not found for update.")
+                    raise FinanceTransactionConflictError(transaction.id)
+
+                model = (
+                    await session.execute(
+                        select(FinanceTransactionModel).where(FinanceTransactionModel.id == transaction.id)
+                    )
+                ).scalar_one()
+                await self._apply_balance_deltas(session, transaction.owner_jid, balance_deltas)
 
             await session.refresh(model)
             return _transaction_from_model(
@@ -389,6 +543,7 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
                 select(FinanceTransactionModel).where(
                     (FinanceTransactionModel.id == tx_id) | (FinanceTransactionModel.human_tx_id == tx_id),
                     FinanceTransactionModel.owner_jid == owner_jid,
+                    FinanceTransactionModel.deleted_at.is_(None),
                 )
             )
             m = result.scalar_one_or_none()
@@ -500,7 +655,7 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
         self,
         owner_jid: str,
         keyword: str | None = None,
-        date: datetime | None = None,
+        date: date_type | datetime | None = None,
         transaction_type: str | None = None,
         limit: int = 5,
     ) -> list[FinanceTransaction]:
@@ -522,12 +677,12 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
                     )
                 )
             if date:
-                # Match same calendar day
-                day_start = date.replace(hour=0, minute=0, second=0, microsecond=0)
-                day_end = date.replace(hour=23, minute=59, second=59, microsecond=999999)
+                # Match same local calendar day
+                day = date.date() if isinstance(date, datetime) else date
+                day_start, day_end = day_bounds_utc(day)
                 q = q.where(
                     FinanceTransactionModel.transaction_date >= day_start,
-                    FinanceTransactionModel.transaction_date <= day_end,
+                    FinanceTransactionModel.transaction_date < day_end,
                 )
             if transaction_type:
                 q = q.where(FinanceTransactionModel.transaction_type == transaction_type)
@@ -560,7 +715,7 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
         tx_id: str,
         owner_jid: str,
     ) -> bool:
-        """Hard delete transaksi dan kembalikan saldo ke kondisi sebelumnya."""
+        """Soft delete transaksi (baris tetap ada, ditandai deleted_at) dan kembalikan saldo."""
         async with self._session() as session:
             async with session.begin():
                 result = await session.execute(
@@ -569,42 +724,77 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
                         | (FinanceTransactionModel.human_tx_id == tx_id),
                         FinanceTransactionModel.owner_jid == owner_jid,
                         FinanceTransactionModel.is_reversed.is_(False),
+                        FinanceTransactionModel.reversal_of_id.is_(None),
+                        FinanceTransactionModel.deleted_at.is_(None),
                     )
                 )
                 tx_m = result.scalar_one_or_none()
                 if not tx_m:
                     return False
 
-                # Kembalikan saldo akun
-                acc_result = await session.execute(
-                    select(FinanceAccountModel).where(
-                        FinanceAccountModel.id == tx_m.account_id
+                # Conditional update lebih dulu: dua penghapusan bersamaan hanya satu yang mengubah saldo.
+                marked = await session.execute(
+                    update(FinanceTransactionModel)
+                    .where(
+                        FinanceTransactionModel.id == tx_m.id,
+                        FinanceTransactionModel.is_reversed.is_(False),
+                        FinanceTransactionModel.deleted_at.is_(None),
                     )
+                    .values(is_reversed=True, deleted_at=datetime.now(UTC))
                 )
-                acc = acc_result.scalar_one_or_none()
-                if acc:
-                    tx_type = tx_m.transaction_type
-                    amount = Decimal(str(tx_m.amount))
-                    if tx_type == TransactionType.INCOME.value:
-                        # Batalkan income: kurangi saldo
-                        acc.balance = acc.balance - amount
-                    elif tx_type == TransactionType.EXPENSE.value:
-                        # Batalkan expense: tambah saldo
-                        acc.balance = acc.balance + amount
-                    elif tx_type == TransactionType.TRANSFER.value:
-                        # Batalkan transfer: kembalikan saldo from, kurangi saldo to
-                        acc.balance = acc.balance + amount
-                        if tx_m.transfer_to_account_id:
-                            to_result = await session.execute(
-                                select(FinanceAccountModel).where(
-                                    FinanceAccountModel.id == tx_m.transfer_to_account_id
+                if marked.rowcount != 1:  # type: ignore[attr-defined]
+                    return False
+
+                acc_names = {
+                    a.id: a.name
+                    for a in (
+                        await session.execute(
+                            select(FinanceAccountModel).where(
+                                FinanceAccountModel.id.in_(
+                                    [i for i in (tx_m.account_id, tx_m.transfer_to_account_id) if i]
                                 )
                             )
-                            to_acc = to_result.scalar_one_or_none()
-                            if to_acc:
-                                to_acc.balance = to_acc.balance - amount
+                        )
+                    ).scalars()
+                }
+                cat_name = None
+                if tx_m.category_id:
+                    cat = (
+                        await session.execute(
+                            select(FinanceCategoryModel).where(
+                                FinanceCategoryModel.id == tx_m.category_id
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    cat_name = cat.name if cat else None
+                _add_audit(
+                    session, owner_jid, "transaction", tx_m.id, "delete",
+                    f"{tx_m.transaction_type} {tx_m.amount} - {tx_m.description or '-'}",
+                    _row_snapshot(
+                        tx_m,
+                        account_name=acc_names.get(tx_m.account_id),
+                        transfer_to_account_name=acc_names.get(tx_m.transfer_to_account_id),
+                        category_name=cat_name,
+                    ),
+                )
 
-                await session.delete(tx_m)
+                # Kembalikan saldo akun
+                tx_type = tx_m.transaction_type
+                amount = Decimal(str(tx_m.amount))
+                deltas: dict[str, Decimal] = {}
+                if tx_type == TransactionType.INCOME.value:
+                    # Batalkan income: kurangi saldo
+                    deltas[tx_m.account_id] = -amount
+                elif tx_type == TransactionType.EXPENSE.value:
+                    # Batalkan expense: tambah saldo
+                    deltas[tx_m.account_id] = amount
+                elif tx_type == TransactionType.TRANSFER.value:
+                    # Batalkan transfer: kembalikan saldo from, kurangi saldo to
+                    deltas[tx_m.account_id] = amount
+                    if tx_m.transfer_to_account_id:
+                        deltas[tx_m.transfer_to_account_id] = -amount
+                # Hapus transaksi memang boleh membuat saldo minus (perilaku lama dipertahankan).
+                await self._apply_balance_deltas(session, owner_jid, deltas, allow_negative=True)
         return True
 
     async def get_transactions_by_period(
@@ -652,11 +842,7 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
         self, owner_jid: str, year: int, month: int
     ) -> MonthlySummary:
 
-        start = datetime(year, month, 1, tzinfo=UTC)
-        if month == 12:
-            end = datetime(year + 1, 1, 1, tzinfo=UTC)
-        else:
-            end = datetime(year, month + 1, 1, tzinfo=UTC)
+        start, end = month_bounds_utc(year, month)
 
         async with self._session() as session:
             result = await session.execute(
@@ -738,6 +924,39 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
+    async def _apply_balance_deltas(
+        self,
+        session: AsyncSession,
+        owner_jid: str,
+        balance_deltas: dict[str, Decimal],
+        allow_negative: bool = False,
+    ) -> None:
+        """Terapkan perubahan saldo relatif (balance = balance + delta) dalam transaksi aktif.
+
+        Update relatif di level SQL mencegah lost update ketika dua pesan memproses
+        rekening yang sama bersamaan. Delta negatif ditolak jika membuat saldo minus.
+        """
+        for acc_id, delta in balance_deltas.items():
+            if delta == 0:
+                continue
+            stmt = (
+                update(FinanceAccountModel)
+                .where(
+                    FinanceAccountModel.id == acc_id,
+                    FinanceAccountModel.owner_jid == owner_jid,
+                )
+                .values(balance=FinanceAccountModel.balance + delta)
+            )
+            if not allow_negative:
+                # Backstop atomik: rekening nonaktif tidak boleh bertransaksi lagi.
+                stmt = stmt.where(FinanceAccountModel.is_active.is_(True))
+                if delta < 0:
+                    # round(): saldo disimpan sebagai REAL di SQLite; hindari penolakan salah akibat error float.
+                    stmt = stmt.where(func.round(FinanceAccountModel.balance + delta, 2) >= 0)
+            result = await session.execute(stmt)
+            if result.rowcount != 1:
+                raise FinanceBalanceConflictError(acc_id)
+
     async def _fetch_accounts_by_ids(
         self, session: AsyncSession, ids: set[str]
     ) -> dict[str, str]:
@@ -779,6 +998,7 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
             model = result.scalar_one_or_none()
             if model:
                 model.amount = budget.amount
+                model.is_recurring = budget.is_recurring
                 model.updated_at = datetime.now(UTC)
             else:
                 model = FinanceBudgetModel(
@@ -788,6 +1008,7 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
                     amount=budget.amount,
                     month=budget.month,
                     year=budget.year,
+                    is_recurring=budget.is_recurring,
                     created_at=budget.created_at,
                     updated_at=budget.updated_at,
                 )
@@ -864,9 +1085,89 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
             model = result.scalar_one_or_none()
             if not model:
                 return False
+            cat = (
+                await session.execute(
+                    select(FinanceCategoryModel).where(FinanceCategoryModel.id == category_id)
+                )
+            ).scalar_one_or_none()
+            cat_name = cat.name if cat else None
+            _add_audit(
+                session, owner_jid, "budget", model.id, "delete",
+                f"Budget {cat_name or category_id} {month:02d}/{year}: {model.amount}",
+                _row_snapshot(model, category_name=cat_name),
+            )
             await session.delete(model)
+            # Hentikan perulangan: bulan-bulan sebelumnya tidak boleh menyalin ulang budget ini.
+            await session.execute(
+                update(FinanceBudgetModel)
+                .where(
+                    FinanceBudgetModel.owner_jid == owner_jid,
+                    FinanceBudgetModel.category_id == category_id,
+                )
+                .values(is_recurring=False)
+            )
             await session.commit()
             return True
+
+    async def carry_over_recurring_budgets(
+        self, owner_jid: str, month: int, year: int
+    ) -> int:
+        target = year * 12 + month
+        async with self._session() as session:
+            existing = set(
+                (
+                    await session.execute(
+                        select(FinanceBudgetModel.category_id).where(
+                            FinanceBudgetModel.owner_jid == owner_jid,
+                            FinanceBudgetModel.month == month,
+                            FinanceBudgetModel.year == year,
+                        )
+                    )
+                ).scalars()
+            )
+            earlier = (
+                await session.execute(
+                    select(FinanceBudgetModel)
+                    .where(
+                        FinanceBudgetModel.owner_jid == owner_jid,
+                        (FinanceBudgetModel.year * 12 + FinanceBudgetModel.month) < target,
+                    )
+                    .order_by(FinanceBudgetModel.year.desc(), FinanceBudgetModel.month.desc())
+                )
+            ).scalars().all()
+
+            seen: set[str] = set()
+            created = 0
+            now = datetime.now(UTC)
+            for src in earlier:
+                if src.category_id in seen:
+                    continue
+                seen.add(src.category_id)  # hanya baris terbaru per kategori yang menentukan
+                if src.category_id in existing or not src.is_recurring:
+                    continue
+                session.add(
+                    FinanceBudgetModel(
+                        id=str(uuid.uuid4()),
+                        owner_jid=owner_jid,
+                        category_id=src.category_id,
+                        amount=src.amount,
+                        month=month,
+                        year=year,
+                        is_recurring=True,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                created += 1
+            if not created:
+                return 0
+            try:
+                await session.commit()
+            except IntegrityError:
+                # Request lain sudah menyalin lebih dulu; aman diabaikan.
+                await session.rollback()
+                return 0
+            return created
 
     async def get_budget_progress(
         self, owner_jid: str, category_id: str, month: int, year: int
@@ -875,11 +1176,7 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
         if not budget:
             return None
 
-        start = datetime(year, month, 1, tzinfo=UTC)
-        if month == 12:
-            end = datetime(year + 1, 1, 1, tzinfo=UTC)
-        else:
-            end = datetime(year, month + 1, 1, tzinfo=UTC)
+        start, end = month_bounds_utc(year, month)
 
         async with self._session() as session:
             result = await session.execute(
@@ -915,11 +1212,7 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
         if not budgets:
             return []
 
-        start = datetime(year, month, 1, tzinfo=UTC)
-        if month == 12:
-            end = datetime(year + 1, 1, 1, tzinfo=UTC)
-        else:
-            end = datetime(year, month + 1, 1, tzinfo=UTC)
+        start, end = month_bounds_utc(year, month)
 
         cat_ids = [b.category_id for b in budgets]
         async with self._session() as session:
@@ -965,9 +1258,31 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
         """Hapus semua data finance milik owner_jid dan return jumlah baris per tabel."""
         from sqlalchemy import delete as sa_delete
 
+        if self._pre_destructive_snapshot is not None:
+            # Gagal membuat snapshot = reset dibatalkan (data tidak boleh hilang tanpa cadangan).
+            await asyncio.to_thread(self._pre_destructive_snapshot, "pre-reset")
+
         async with self._session() as session:
             # Urutan penting: hapus dependant dulu sebelum parent
             counts: dict[str, int] = {}
+
+            # Audit: simpan semua baris yang akan dihapus (satu catatan per baris, satu transaksi DB).
+            for model_cls, etype in (
+                (FinanceTransactionModel, "transaction"),
+                (FinanceBudgetModel, "budget"),
+                (FinanceAccountModel, "account"),
+                (FinanceCategoryModel, "category"),
+            ):
+                rows = (
+                    await session.execute(
+                        select(model_cls).where(model_cls.owner_jid == owner_jid)
+                    )
+                ).scalars()
+                for row in rows:
+                    _add_audit(
+                        session, owner_jid, etype, row.id, "reset",
+                        f"Reset data: {etype}", _row_snapshot(row),
+                    )
 
             res = await session.execute(
                 sa_delete(FinanceTransactionModel).where(
@@ -1000,3 +1315,28 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
             await session.commit()
             return counts
 
+
+    # ── Audit log ─────────────────────────────────────────────────────────────
+
+    async def get_audit_log(
+        self, owner_jid: str, limit: int = 20, entity_type: str | None = None
+    ) -> list[FinanceAuditEntry]:
+        async with self._session() as session:
+            q = select(FinanceAuditLogModel).where(FinanceAuditLogModel.owner_jid == owner_jid)
+            if entity_type:
+                q = q.where(FinanceAuditLogModel.entity_type == entity_type)
+            q = q.order_by(FinanceAuditLogModel.created_at.desc()).limit(limit)
+            rows = (await session.execute(q)).scalars().all()
+            return [
+                FinanceAuditEntry(
+                    id=r.id,
+                    owner_jid=r.owner_jid,
+                    entity_type=r.entity_type,
+                    entity_id=r.entity_id,
+                    action=r.action,
+                    summary=r.summary,
+                    snapshot=json.loads(r.snapshot or "{}"),
+                    created_at=r.created_at,
+                )
+                for r in rows
+            ]

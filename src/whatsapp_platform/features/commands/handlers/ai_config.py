@@ -1,10 +1,27 @@
-"""AIChatCommandHandler for !ai commands (on, off, status, reset, model, stats)."""
+"""AIChatCommandHandler for !ai commands (on, off, status, reset, model, stats, memori)."""
 
+from typing import cast
+
+import structlog
+
+from whatsapp_platform.domain.entities.message import Message
 from whatsapp_platform.features.ai.config_store import AIChatConfigStore
+from whatsapp_platform.features.ai.memory_store import MemoryRejectedError, UserMemoryStore
 from whatsapp_platform.features.commands.base import BaseCommandHandler
 from whatsapp_platform.features.commands.context import CommandContext
 from whatsapp_platform.infrastructure.ai.ai_service import AIService
 from whatsapp_platform.infrastructure.ai.constants import ALL_SUPPORTED_MODELS, SUPPORTED_MODELS
+from whatsapp_platform.infrastructure.config.settings import Settings
+
+logger = structlog.get_logger()
+
+# Sub-command yang mengubah konfigurasi atau membuka data pemakaian: khusus admin.
+_ADMIN_SUBCOMMANDS = frozenset({"on", "off", "reset", "model", "stats"})
+
+_ADMIN_ONLY_TEXT = (
+    "⛔ Perintah ini khusus admin bot.\n"
+    "Admin diatur lewat `AI_ADMIN_JIDS` di file .env (nomor WhatsApp, pisahkan dengan koma)."
+)
 
 
 class AIChatCommandHandler(BaseCommandHandler):
@@ -17,11 +34,32 @@ class AIChatCommandHandler(BaseCommandHandler):
     - !ai reset         : Clear LLM conversation context (does NOT delete DB messages)
     - !ai model <name>  : Set per-chat model override (validated against whitelist)
     - !ai stats         : Display daily LLM usage counters and key pool status
+    - !ai memori        : Tampilkan memori AI milik pengirim di chat ini
+    - !ai ingat <fakta> : Simpan fakta ke memori pengirim
+    - !ai lupa <n|teks|semua> : Hapus memori pengirim
     """
 
-    def __init__(self, config_store: AIChatConfigStore, ai_service: AIService) -> None:
+    def __init__(
+        self,
+        config_store: AIChatConfigStore,
+        ai_service: AIService,
+        settings: Settings | None = None,
+        memory_store: UserMemoryStore | None = None,
+    ) -> None:
         self._config_store = config_store
         self._ai_service = ai_service
+        self._memory_store = memory_store
+        self._admin_jids = set(cast(list[str], settings.ai_admin_jids)) if settings else set()
+        if not self._admin_jids:
+            logger.warning("AI_ADMIN_JIDS kosong: tidak ada yang bisa menjalankan !ai on/off/reset/model/stats")
+
+    def _is_admin(self, msg: Message) -> bool:
+        """Admin = pengirim yang terdaftar di AI_ADMIN_JIDS (nomor atau JID lengkap).
+
+        Pesan dari nomor bot sendiri tidak pernah sampai ke sini (router mengabaikan is_from_me).
+        """
+        sender = msg.sender_jid
+        return str(sender) in self._admin_jids or sender.user in self._admin_jids
 
     @property
     def command_name(self) -> str:
@@ -29,7 +67,7 @@ class AIChatCommandHandler(BaseCommandHandler):
 
     @property
     def description(self) -> str:
-        return "Pengaturan AI Assistant (!ai on/off/status/reset/model/stats)"
+        return "Pengaturan AI Assistant (!ai on/off/status/reset/model/stats/memori)"
 
     async def handle(self, ctx: CommandContext) -> None:
         args = ctx.command.args
@@ -45,11 +83,24 @@ class AIChatCommandHandler(BaseCommandHandler):
                 "• `!ai reset` - Reset konteks percakapan AI\n"
                 "• `!ai model <nama>` - Ganti model AI\n"
                 "• `!ai stats` - Cek statistik penggunaan LLM\n"
+                "• `!ai memori` - Lihat hal yang diingat AI tentangmu\n"
+                "• `!ai ingat <fakta>` - Minta AI mengingat sesuatu\n"
+                "• `!ai lupa <nomor|teks|semua>` - Hapus memori AI\n"
                 "-----------------------------------"
             )
             return
 
         sub_command = args[0].lower()
+
+        if sub_command in _ADMIN_SUBCOMMANDS and not self._is_admin(ctx.message):
+            logger.info(
+                "Rejected non-admin !ai command",
+                sub_command=sub_command,
+                sender=str(ctx.message.sender_jid),
+                chat=chat_jid_str,
+            )
+            await ctx.reply(_ADMIN_ONLY_TEXT)
+            return
 
         if sub_command == "on":
             await self._handle_on(ctx, chat_jid_str)
@@ -64,6 +115,12 @@ class AIChatCommandHandler(BaseCommandHandler):
             await self._handle_model(ctx, chat_jid_str, model_name)
         elif sub_command == "stats":
             await self._handle_stats(ctx)
+        elif sub_command in ("memori", "memory"):
+            await self._handle_memory_list(ctx, chat_jid_str)
+        elif sub_command == "ingat":
+            await self._handle_memory_add(ctx, chat_jid_str, " ".join(args[1:]))
+        elif sub_command == "lupa":
+            await self._handle_memory_forget(ctx, chat_jid_str, " ".join(args[1:]))
         else:
             await ctx.reply(f"❌ Sub-command `!ai {sub_command}` tidak dikenali. Ketik `!ai` untuk bantuan.")
 
@@ -83,6 +140,59 @@ class AIChatCommandHandler(BaseCommandHandler):
             )
 
         await ctx.reply(response)
+
+    async def _handle_memory_list(self, ctx: CommandContext, chat_jid: str) -> None:
+        if self._memory_store is None:
+            await ctx.reply("ℹ️ Fitur memori AI sedang dinonaktifkan.")
+            return
+        entries = await self._memory_store.get_all(chat_jid, str(ctx.message.sender_jid))
+        if not entries:
+            await ctx.reply(
+                "🧠 Belum ada yang AI ingat tentangmu di chat ini.\n"
+                "Contoh: `!ai ingat panggil aku Mas Dahlan`"
+            )
+            return
+        lines = "\n".join(f"{i}. {entry}" for i, entry in enumerate(entries, start=1))
+        await ctx.reply(
+            "🧠 *MEMORI AI TENTANGMU*\n"
+            "-----------------------------------\n"
+            f"{lines}\n"
+            "-----------------------------------\n"
+            "Hapus dengan `!ai lupa <nomor>` atau `!ai lupa semua`."
+        )
+
+    async def _handle_memory_add(self, ctx: CommandContext, chat_jid: str, fact: str) -> None:
+        if self._memory_store is None:
+            await ctx.reply("ℹ️ Fitur memori AI sedang dinonaktifkan.")
+            return
+        if not fact.strip():
+            await ctx.reply("Format: `!ai ingat <fakta>`, contoh: `!ai ingat aku vegetarian`")
+            return
+        try:
+            entries = await self._memory_store.add(chat_jid, str(ctx.message.sender_jid), fact)
+        except MemoryRejectedError as exc:
+            await ctx.reply(f"❌ {exc.user_message}")
+            return
+        await ctx.reply(f"✅ Oke, sudah kuingat. ({len(entries)} catatan memori)")
+
+    async def _handle_memory_forget(self, ctx: CommandContext, chat_jid: str, query: str) -> None:
+        if self._memory_store is None:
+            await ctx.reply("ℹ️ Fitur memori AI sedang dinonaktifkan.")
+            return
+        user_id = str(ctx.message.sender_jid)
+        query = query.strip()
+        if not query:
+            await ctx.reply("Format: `!ai lupa <nomor|teks|semua>`. Lihat nomornya dengan `!ai memori`.")
+            return
+        if query.lower() in ("semua", "all"):
+            count = await self._memory_store.clear(chat_jid, user_id)
+            await ctx.reply(f"🧹 {count} catatan memori dihapus.")
+            return
+        removed = await self._memory_store.remove(chat_jid, user_id, query)
+        if not removed:
+            await ctx.reply("❌ Tidak ada memori yang cocok. Cek daftar dengan `!ai memori`.")
+            return
+        await ctx.reply("🗑️ Dihapus dari memori:\n" + "\n".join(f"• {e}" for e in removed))
 
     async def _handle_off(self, ctx: CommandContext, chat_jid: str) -> None:
         await self._config_store.set_enabled(chat_jid, False)
@@ -117,11 +227,15 @@ class AIChatCommandHandler(BaseCommandHandler):
         await ctx.reply(text)
 
     async def _handle_reset(self, ctx: CommandContext, chat_jid: str) -> None:
-        # C7: !ai reset clears the LLM conversation context cache ONLY.
-        # This code explicitly clears the in-memory context window in AIService.
-        # It does NOT delete or alter any messages stored in the database.
+        # C7: !ai reset menandai waktu reset; AI mengabaikan history sebelum waktu ini.
+        # Pesan di database WhatsApp tidak dihapus.
+        await self._config_store.mark_context_reset(chat_jid)
         await self._ai_service.clear_context(chat_jid)
-        await ctx.reply("🧹 *Konteks Percakapan AI Di-reset*.\n(Pesan di database tetap tersimpan).")
+        await ctx.reply(
+            "🧹 *Konteks Percakapan AI Di-reset*.\n"
+            "Percakapan sebelumnya tidak lagi dipakai AI. (Pesan di database tetap tersimpan).\n"
+            "Memori jangka panjang tidak ikut terhapus; gunakan `!ai lupa semua` untuk itu."
+        )
 
     async def _handle_model(self, ctx: CommandContext, chat_jid: str, model_name: str) -> None:
         if not model_name:

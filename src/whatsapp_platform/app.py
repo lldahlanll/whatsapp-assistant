@@ -13,8 +13,8 @@ from whatsapp_platform.application.services.feature_registry import FeatureRegis
 from whatsapp_platform.container import Container
 from whatsapp_platform.features.ai import AIFeature
 from whatsapp_platform.features.commands import CommandsFeature
-from whatsapp_platform.features.customer_lookup import CustomerLookupFeature
 from whatsapp_platform.features.messaging import MessagingFeature
+from whatsapp_platform.features.scheduler import SchedulerFeature
 from whatsapp_platform.features.session import SessionFeature
 from whatsapp_platform.infrastructure.config.settings import Settings
 from whatsapp_platform.infrastructure.logging.setup import setup_logging
@@ -44,7 +44,13 @@ class Application:
 
     async def start(self) -> None:
         """Start WhatsApp Platform Application."""
-        setup_logging(log_level=self.settings.log_level, app_env=self.settings.app_env)
+        setup_logging(
+            log_level=self.settings.log_level,
+            app_env=self.settings.app_env,
+            log_file_path=self.settings.log_file_path,
+            log_file_max_bytes=self.settings.log_file_max_bytes,
+            log_file_backup_count=self.settings.log_file_backup_count,
+        )
         logger.info(
             "Starting WhatsApp Platform Application",
             version=_APP_VERSION,
@@ -58,18 +64,23 @@ class Application:
         feature_registry.register(SessionFeature())
         feature_registry.register(MessagingFeature())
         feature_registry.register(CommandsFeature())
-        feature_registry.register(self.container.resolve(CustomerLookupFeature))
         feature_registry.register(AIFeature())
+        feature_registry.register(SchedulerFeature())
 
         await feature_registry.initialize_all(self.container)
 
+        for warning in self.settings.mikrotik_security_warnings():
+            logger.warning("MikroTik config berisiko", detail=warning, env=self.settings.app_env)
+
         if self.settings.api_enabled:
+            if not self.settings.api_key:
+                logger.warning("API_KEY kosong: endpoint /api/v1/* menolak semua request (503) sampai diisi")
             self._api_task = asyncio.create_task(self._run_api_server())
             logger.info(
                 "🌐 REST API server starting",
                 host=self.settings.api_host,
                 port=self.settings.api_port,
-                docs=f"http://{self.settings.api_host}:{self.settings.api_port}/docs",
+                docs_enabled=self.settings.api_docs_enabled,
             )
 
         self._running = True

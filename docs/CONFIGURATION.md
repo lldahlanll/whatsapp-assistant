@@ -18,7 +18,7 @@ cp .env.example .env
 |---|---|---|
 | `APP_NAME` | `whatsapp-platform` | Nama aplikasi (untuk logging) |
 | `APP_ENV` | `development` | Environment: `development`, `staging`, `production` |
-| `DEBUG` | `true` | Aktifkan debug logging |
+| `DEBUG` | `false` | Aktifkan debug logging |
 | `LOG_LEVEL` | `INFO` | Level log: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` |
 | `COMMAND_PREFIX` | `!` | Prefix perintah bot (contoh: `!ping`) |
 
@@ -53,9 +53,13 @@ Database SQLite akan otomatis dibuat dan di-migrasi saat startup menggunakan Ale
 | Variable | Default | Deskripsi |
 |---|---|---|
 | `API_ENABLED` | `true` | Aktifkan REST API server |
-| `API_HOST` | `0.0.0.0` | Host bind API server |
+| `AI_RATE_LIMIT_PER_USER_MAX_REQUESTS` | `3` | Batas request AI per pengirim di grup per window (0 = nonaktif) |
+| `API_HOST` | `127.0.0.1` | Host bind API server (di Docker di-override ke `0.0.0.0` oleh compose) |
+| `API_DOCS_ENABLED` | `false` | Buka `/docs`, `/redoc`, `/openapi.json` |
+| `API_CORS_ORIGINS` | _(kosong)_ | Origin browser yang diizinkan (comma-separated). Kosong = CORS mati |
+| `API_BIND` | `127.0.0.1` | Hanya docker-compose: alamat host untuk publish port API |
 | `API_PORT` | `8077` | Port API server |
-| `API_KEY` | _(kosong)_ | Secret key untuk autentikasi `X-API-Key`. Kosong = API tidak dilindungi |
+| `API_KEY` | _(kosong)_ | Secret key untuk autentikasi `X-API-Key`. Kosong = semua endpoint `/api/v1/*` ditolak (503); `/health` tetap terbuka |
 
 **Endpoints yang tersedia** (jika `API_ENABLED=true`):
 
@@ -114,9 +118,19 @@ Untuk pengguna yang menjalankan LLM router sendiri (OpenAI-compatible):
 | `AI_CONTEXT_WINDOW_MESSAGES` | `20` | Max pesan dalam konteks LLM |
 | `AI_MAX_CONTEXT_CHARS` | `16000` | Max karakter konteks yang dikirim ke LLM |
 | `AI_BOT_MENTION_NAME` | _(kosong)_ | Nama bot untuk deteksi @mention di group chat |
+| `AI_DEFAULT_ENABLED` | `false` | Chat baru langsung dibalas AI. Default mati: aktifkan per chat dengan `!ai on` agar orang asing tidak memakai kuota |
+| `AI_ADMIN_JIDS` | _(kosong)_ | Nomor/JID yang boleh menjalankan `!ai on/off/reset/model/stats` (comma-separated). Kosong = tidak ada yang bisa menjalankan perintah tersebut (nomor bot sendiri juga tidak, karena pesan dari nomor bot diabaikan). `!ai status` tetap terbuka |
 | `AI_HTTP_TIMEOUT_SECONDS` | `30.0` | Timeout HTTP request ke AI provider |
 | `AI_VISION_ENABLED` | `true` | Analisis gambar: pesan gambar (opsional caption) yang memicu AI dikirim ke model vision (`NINEROUTER_MODEL_VISION`) |
 | `AI_IMAGE_MAX_BYTES` | `5242880` | Ukuran maksimum gambar (byte, default 5 MB); gambar lebih besar ditolak dengan pesan ke user |
+| `AI_MEMORY_ENABLED` | `true` | Memori jangka panjang per pengguna. Fakta disimpan lewat `!ai ingat` atau kalimat seperti "tolong ingat ya ...", lalu disuntikkan ke system prompt. Scope per (chat, pengirim): memori chat pribadi tidak muncul di grup |
+| `AI_MEMORY_MAX_ENTRIES` | `20` | Maksimum catatan memori per pengguna per chat |
+| `AI_MEMORY_MAX_CHARS` | `1500` | Maksimum total karakter memori per pengguna per chat (membatasi tambahan token per balasan) |
+| `AI_VOICE_ENABLED` | `true` | Voice note yang memicu AI ditranskripsi dengan Groq Whisper lalu diproses seperti pesan teks (termasuk pencatatan keuangan). Butuh `GROQ_API_KEYS`; di grup hanya diproses jika membalas pesan bot |
+| `AI_AUDIO_MAX_SECONDS` | `180` | Durasi maksimum voice note (detik); dicek sebelum diunduh |
+| `AI_AUDIO_MAX_BYTES` | `10485760` | Ukuran maksimum voice note (byte, default 10 MB) |
+| `AI_TRANSCRIPTION_MODEL` | `whisper-large-v3-turbo` | Model transkripsi Groq |
+| `AI_TRANSCRIPTION_LANGUAGE` | `id` | Kode bahasa ISO-639-1 untuk transkripsi; kosong = deteksi otomatis |
 
 **Pengaturan history per-intent:**
 
@@ -133,24 +147,6 @@ Untuk pengguna yang menjalankan LLM router sendiri (OpenAI-compatible):
 |---|---|---|
 | `AI_MAX_TOOL_RESULT_CHARS` | `1000` | Max karakter hasil tool call yang dikirim ke LLM |
 | `AI_MAX_TOOL_ITERATIONS` | `3` | Max iterasi agentic loop (tool → LLM → tool) |
-
----
-
-### 🔍 Customer Lookup (MySQL)
-
-Untuk lookup data pelanggan dari database MySQL eksternal.
-
-| Variable | Default | Deskripsi |
-|---|---|---|
-| `MYSQL_HOST` | _(kosong)_ | MySQL host. Kosong = fitur dinonaktifkan |
-| `MYSQL_PORT` | `3306` | MySQL port |
-| `MYSQL_USER` | _(kosong)_ | MySQL username |
-| `MYSQL_PASSWORD` | _(kosong)_ | MySQL password |
-| `MYSQL_DB` | _(kosong)_ | MySQL database name |
-| `MYSQL_POOL_MIN_SIZE` | `1` | Minimum pool size |
-| `MYSQL_POOL_MAX_SIZE` | `3` | Maximum pool size |
-| `MYSQL_QUERY_TIMEOUT_MS` | `3000` | Query timeout (milidetik) |
-| `CUSTOMER_LOOKUP_ALLOWED_GROUPS` | _(kosong)_ | Group JID yang diizinkan (comma-separated). Kosong = semua group diizinkan |
 
 ---
 
@@ -173,7 +169,7 @@ Integrasi dengan router MikroTik via REST API.
 
 | Variable | Default | Deskripsi |
 |---|---|---|
-| `NETWORK_ALLOWED_JIDS` | _(kosong)_ | Whitelist JID yang boleh menjalankan perintah network (comma-separated). Kosong = semua boleh |
+| `NETWORK_ALLOWED_JIDS` | _(kosong)_ | Whitelist nomor/JID (user atau group) yang boleh membaca data router (comma-separated). Kosong = memakai `AI_ADMIN_JIDS`; keduanya kosong = tidak ada yang boleh |
 
 **Cache TTL (seconds):**
 
@@ -230,14 +226,6 @@ AI_RATE_LIMIT_WINDOW_SECONDS=60
 AI_BOT_MENTION_NAME="Nara"
 AI_HTTP_TIMEOUT_SECONDS=30
 
-# Customer Lookup MySQL
-MYSQL_HOST="127.0.0.1"
-MYSQL_PORT=3306
-MYSQL_USER="wa_user"
-MYSQL_PASSWORD="your-mysql-password"
-MYSQL_DB="customer_db"
-CUSTOMER_LOOKUP_ALLOWED_GROUPS="12036301234567890@g.us"
-
 # MikroTik
 MIKROTIK_ENABLED=true
 MIKROTIK_HOST="192.168.88.1"
@@ -255,7 +243,7 @@ COMMAND_PREFIX="!"
 ## ⚠️ Tips Keamanan
 
 1. **Jangan pernah** commit file `.env` atau `.env.docker` ke Git
-2. Gunakan **password yang kuat** untuk MySQL dan API keys
+2. Gunakan **password yang kuat** untuk API keys
 3. Set `API_KEY` untuk proteksi REST API
 4. Gunakan `NETWORK_ALLOWED_JIDS` untuk membatasi akses network commands
 5. Buat user **read-only** di MikroTik untuk integrasi bot

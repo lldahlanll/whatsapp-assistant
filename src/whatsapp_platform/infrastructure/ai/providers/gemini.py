@@ -132,7 +132,7 @@ def _build_gemini_payload(
 class GeminiProvider(ILLMProvider):
     """Adapter for Google Gemini REST API.
 
-    Endpoint: POST {base}/{model}:generateContent?key={api_key}
+    Endpoint: POST {base}/{model}:generateContent (key via header x-goog-api-key)
     Request body: { "system_instruction": {...}, "contents": [...], "tools": [...] }
     """
 
@@ -177,11 +177,12 @@ class GeminiProvider(ILLMProvider):
         payload = _build_gemini_payload(messages, tools=tools)
 
         url = f"{_GEMINI_API_BASE}/{model}:generateContent"
-        params = {"key": api_key}
+        # Key lewat header, bukan query string: URL ikut tercatat di log httpx.
+        headers = {"x-goog-api-key": api_key}
 
         start = time.monotonic()
         try:
-            response = await self._client.post(url, json=payload, params=params)
+            response = await self._client.post(url, json=payload, headers=headers)
         except httpx.TimeoutException as exc:
             raise ProviderError(f"Gemini request timed out: {exc}") from exc
         except httpx.RequestError as exc:

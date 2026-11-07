@@ -33,6 +33,7 @@ def chat_jid() -> JID:
 def mock_service() -> AsyncMock:
     svc = AsyncMock()
     svc._repo = AsyncMock()
+    svc.get_budget_alert.return_value = None
     return svc
 
 
@@ -165,7 +166,8 @@ async def test_tool_executor_expense_with_custom_date(
         amount=Decimal("50000"),
         category_id=None,
         description="Makan malam kemarin",
-        transaction_date=datetime(2026, 8, 23, 19, 0, tzinfo=UTC),
+        # 19:00 WIB tanggal 23 = 12:00 UTC
+        transaction_date=datetime(2026, 8, 23, 12, 0, tzinfo=UTC),
         transfer_to_account_id=None,
         created_at=datetime.now(UTC),
         account_name="BCA",
@@ -188,7 +190,8 @@ async def test_tool_executor_expense_with_custom_date(
     assert data["status"] == "success"
     assert data["date"] == "2026-08-23"
     mock_service.add_expense.assert_called_once()
-    assert mock_service.add_expense.call_args[1]["date"] == datetime(2026, 8, 23, 0, 0, tzinfo=UTC)
+    # Tanggal dari LLM = tengah malam WIB, disimpan sebagai UTC
+    assert mock_service.add_expense.call_args.kwargs["date"] == datetime(2026, 8, 22, 17, 0, tzinfo=UTC)
 
 
 @pytest.mark.asyncio
@@ -241,12 +244,25 @@ async def test_tool_executor_delete_account_confirmed(
     mock_service.find_account_by_name.return_value = bca_acc
     mock_service.delete_account.return_value = bca_acc
 
-    # Call with confirm=True
+    # Pesan 1: LLM langsung kirim confirm=True → tetap diminta konfirmasi dulu
+    first = await executor.execute(
+        tool_name="finance_delete_account",
+        arguments={"name": "BCA", "confirm": True},
+        user_jid=user_jid,
+        chat_jid=chat_jid,
+        message_id="msg-1",
+    )
+    assert json.loads(first)["status"] == "need_confirmation"
+    mock_service.delete_account.assert_not_called()
+
+    # Pesan 2: user menjawab "ya" → baru dieksekusi
     res_raw = await executor.execute(
         tool_name="finance_delete_account",
         arguments={"name": "BCA", "confirm": True},
         user_jid=user_jid,
         chat_jid=chat_jid,
+        message_id="msg-2",
+        user_text="ya",
     )
 
     data = json.loads(res_raw)

@@ -5,6 +5,7 @@ import structlog
 from whatsapp_platform.domain.value_objects.jid import JID
 from whatsapp_platform.features.commands.base import BaseCommandHandler
 from whatsapp_platform.features.commands.context import CommandContext
+from whatsapp_platform.features.commands.group_permissions import require_group_admin
 
 logger = structlog.get_logger()
 
@@ -27,6 +28,9 @@ class AddHandler(BaseCommandHandler):
 
         if not ctx.group_mgmt_uc:
             await ctx.reply("❌ Fitur Group Management belum terkonfigurasi.")
+            return
+
+        if not await require_group_admin(ctx):
             return
 
         if not ctx.command.args:

@@ -2,21 +2,36 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
-from datetime import UTC, datetime
+import re
+import time
+from contextvars import ContextVar
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from whatsapp_platform.features.finance.formatter import format_budget_alert
 from whatsapp_platform.features.finance.service import (
     AccountNotFoundError,
     AccountRequiredError,
     BudgetNotFoundError,
+    CategoryAlreadyExistsError,
+    CategoryInUseError,
     CategoryNotFoundError,
     InsufficientBalanceError,
     InvalidAmountError,
     TransactionNotFoundError,
+)
+from whatsapp_platform.shared.utils.timezone import (
+    day_bounds_utc,
+    month_bounds_utc,
+    now_local,
+    parse_local_date,
+    parse_local_datetime,
+    to_local,
 )
 
 if TYPE_CHECKING:
@@ -24,6 +39,64 @@ if TYPE_CHECKING:
     from whatsapp_platform.features.finance.service import FinanceService
 
 logger = structlog.get_logger()
+
+
+# Konfirmasi aksi destruktif harus datang dari pesan user berikutnya, bukan dari LLM di giliran yang sama.
+_CONFIRMATION_TTL_SECONDS = 300.0
+_TRUTHY = {"true", "1", "ya", "iya", "yes", "y"}
+
+
+_AFFIRMATIVE_WORDS = frozenset({
+    "ya", "iya", "iyaa", "y", "yes", "yup", "ok", "oke", "okay", "okey", "lanjut", "lanjutkan",
+    "yakin", "setuju", "benar", "betul", "hapus", "reset", "gas", "silakan", "silahkan",
+})
+_NEGATION_WORDS = frozenset({
+    "jangan", "tidak", "nggak", "ngga", "gak", "ga", "enggak", "bukan", "batal", "batalkan",
+    "cancel", "no", "tunggu", "stop", "belum", "tapi", "kenapa", "apa", "gimana", "bagaimana",
+})
+_MAX_AFFIRMATION_WORDS = 6
+
+# Teks pesan user yang sedang diproses; diisi oleh execute() agar konfirmasi bisa diverifikasi di server.
+_current_user_text: ContextVar[str | None] = ContextVar("finance_current_user_text", default=None)
+
+
+def is_affirmative(text: str | None) -> bool:
+    """True jika pesan user singkat dan jelas menyetujui ("ya", "iya hapus", "ok lanjut").
+
+    Fail closed: teks kosong/None, terlalu panjang, berisi penolakan atau pertanyaan -> False.
+    """
+    if not text:
+        return False
+    if "?" in text:
+        return False
+    words = re.findall(r"[a-z]+", text.lower())
+    if not words or len(words) > _MAX_AFFIRMATION_WORDS:
+        return False
+    if any(w in _NEGATION_WORDS for w in words):
+        return False
+    return words[0] in _AFFIRMATIVE_WORDS
+
+
+def _as_bool(value: Any) -> bool:
+    """bool("false") == True, jadi parse string dari LLM secara eksplisit."""
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in _TRUTHY
+
+
+def _idempotency_key(message_id: str | None, tool_name: str, args: dict) -> str | None:
+    """Kunci anti-dobel dari ID pesan WhatsApp + isi transaksi.
+
+    Pesan yang sama diproses ulang (event ganda, retry) → kunci sama → tidak tercatat dua kali.
+    Dua transaksi berbeda dalam satu pesan ("kopi 20rb dan roti 15rb") → kunci berbeda.
+    """
+    if not message_id:
+        return None
+    payload = {k: v for k, v in sorted(args.items()) if k != "idempotency_key"}
+    digest = hashlib.sha256(
+        json.dumps([tool_name, payload], sort_keys=True, default=str).encode()
+    ).hexdigest()[:16]
+    return f"wa:{message_id[:64]}:{digest}"
 
 
 GROUP_BLOCKED_TOOLS: set[str] = {
@@ -35,6 +108,8 @@ GROUP_BLOCKED_TOOLS: set[str] = {
     "finance_delete_account",
     "finance_get_accounts",
     "finance_get_categories",
+    "finance_create_category",
+    "finance_delete_category",
     "finance_get_transaction_detail",
     "finance_update_transaction",
     "finance_delete_transaction",
@@ -49,6 +124,39 @@ GROUP_BLOCKED_TOOLS: set[str] = {
 class FinanceToolExecutor:
     def __init__(self, finance_service: FinanceService) -> None:
         self._svc = finance_service
+        # (owner, action, target) -> (message_id yang meminta konfirmasi, waktu)
+        self._pending_confirmations: dict[tuple[str, str, str], tuple[str, float]] = {}
+
+    def _confirmed_by_user(
+        self, owner_jid: str, action: str, target: str, message_id: str | None, confirm: Any
+    ) -> bool:
+        """True hanya jika konfirmasi datang di pesan user SETELAH permintaan konfirmasi.
+
+        Panggilan pertama (atau confirm dari giliran yang sama) mendaftarkan permintaan
+        konfirmasi dan mengembalikan False, sehingga LLM tidak bisa mengonfirmasi sendiri.
+        Selain flag dari LLM, teks pesan user itu sendiri harus berupa persetujuan eksplisit
+        (lihat ``is_affirmative``); flag ``confirm`` saja tidak cukup.
+        """
+        key = (owner_jid, action, target)
+        now = time.monotonic()
+        # Buang permintaan konfirmasi kedaluwarsa agar dict tidak tumbuh tanpa batas.
+        expired = [k for k, (_, ts) in self._pending_confirmations.items() if now - ts > _CONFIRMATION_TTL_SECONDS]
+        for k in expired:
+            del self._pending_confirmations[k]
+        pending = self._pending_confirmations.get(key)
+        if (
+            _as_bool(confirm)
+            and message_id
+            and pending is not None
+            and pending[0] != message_id
+            and now - pending[1] <= _CONFIRMATION_TTL_SECONDS
+            and is_affirmative(_current_user_text.get())
+        ):
+            del self._pending_confirmations[key]
+            return True
+        if message_id:
+            self._pending_confirmations[key] = (message_id, now)
+        return False
 
     async def execute(
         self,
@@ -56,6 +164,22 @@ class FinanceToolExecutor:
         arguments: dict[str, Any],
         user_jid: JID,
         chat_jid: JID,
+        message_id: str | None = None,
+        user_text: str | None = None,
+    ) -> str:
+        token = _current_user_text.set(user_text)
+        try:
+            return await self._execute(tool_name, arguments, user_jid, chat_jid, message_id)
+        finally:
+            _current_user_text.reset(token)
+
+    async def _execute(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        user_jid: JID,
+        chat_jid: JID,
+        message_id: str | None = None,
     ) -> str:
         owner_jid = str(user_jid)
         is_group = False
@@ -67,10 +191,11 @@ class FinanceToolExecutor:
         logger.info(
             "Executing finance tool call",
             tool=tool_name,
-            arguments=arguments,
+            argument_names=sorted(arguments),
             owner=owner_jid,
             is_group=is_group,
         )
+        logger.debug("Finance tool call arguments", tool=tool_name, arguments=arguments)
 
         if is_group and tool_name in GROUP_BLOCKED_TOOLS:
             logger.info("Blocked finance tool in group chat", tool=tool_name, owner=owner_jid)
@@ -82,13 +207,13 @@ class FinanceToolExecutor:
 
         try:
             if tool_name == "finance_add_income":
-                result = await self._add_income(owner_jid, arguments)
+                result = await self._add_income(owner_jid, arguments, message_id)
 
             elif tool_name == "finance_add_expense":
-                result = await self._add_expense(owner_jid, arguments)
+                result = await self._add_expense(owner_jid, arguments, message_id)
 
             elif tool_name == "finance_transfer":
-                result = await self._transfer(owner_jid, arguments)
+                result = await self._transfer(owner_jid, arguments, message_id)
 
             elif tool_name == "finance_get_balance":
                 result = await self._get_balance(owner_jid)
@@ -106,13 +231,19 @@ class FinanceToolExecutor:
                 result = await self._create_account(owner_jid, arguments)
 
             elif tool_name == "finance_delete_account":
-                result = await self._delete_account(owner_jid, arguments)
+                result = await self._delete_account(owner_jid, arguments, message_id)
 
             elif tool_name == "finance_get_accounts":
                 result = await self._get_accounts(owner_jid)
 
             elif tool_name == "finance_get_categories":
                 result = await self._get_categories(owner_jid, arguments)
+
+            elif tool_name == "finance_create_category":
+                result = await self._create_category(owner_jid, arguments)
+
+            elif tool_name == "finance_delete_category":
+                result = await self._delete_category(owner_jid, arguments)
 
             elif tool_name == "finance_get_transaction_detail":
                 result = await self._get_transaction_detail(owner_jid, arguments)
@@ -121,7 +252,7 @@ class FinanceToolExecutor:
                 result = await self._update_transaction(owner_jid, arguments)
 
             elif tool_name == "finance_delete_transaction":
-                result = await self._delete_transaction(owner_jid, arguments)
+                result = await self._delete_transaction(owner_jid, arguments, message_id)
 
             elif tool_name == "finance_create_budget":
                 result = await self._create_budget(owner_jid, arguments)
@@ -136,7 +267,7 @@ class FinanceToolExecutor:
                 result = await self._delete_budget(owner_jid, arguments)
 
             elif tool_name == "finance_reset_data":
-                result = await self._reset_data(owner_jid, arguments)
+                result = await self._reset_data(owner_jid, arguments, message_id)
 
             else:
                 return json.dumps({
@@ -153,6 +284,7 @@ class FinanceToolExecutor:
                         data.pop("balance", None)
                         data.pop("from_new_balance", None)
                         data.pop("to_new_balance", None)
+                        data.pop("budget_alert", None)  # memuat nominal budget pribadi
                         if isinstance(data.get("transaction"), dict):
                             data["transaction"].pop("new_balance", None)
                             data["transaction"].pop("balance", None)
@@ -180,7 +312,12 @@ class FinanceToolExecutor:
             return json.dumps({
                 "status": "error",
                 "error_code": "INSUFFICIENT_BALANCE",
-                "message": str(exc),
+                # Pesan asli memuat nominal saldo; jangan bocorkan di grup.
+                "message": (
+                    "Saldo rekening tidak mencukupi. Cek detail saldo lewat chat pribadi."
+                    if is_group
+                    else str(exc)
+                ),
             }, ensure_ascii=False)
         except InvalidAmountError as exc:
             return json.dumps({
@@ -198,6 +335,18 @@ class FinanceToolExecutor:
             return json.dumps({
                 "status": "error",
                 "error_code": "CATEGORY_NOT_FOUND",
+                "message": str(exc),
+            }, ensure_ascii=False)
+        except CategoryAlreadyExistsError as exc:
+            return json.dumps({
+                "status": "error",
+                "error_code": "CATEGORY_EXISTS",
+                "message": str(exc),
+            }, ensure_ascii=False)
+        except CategoryInUseError as exc:
+            return json.dumps({
+                "status": "error",
+                "error_code": "CATEGORY_IN_USE",
                 "message": str(exc),
             }, ensure_ascii=False)
         except BudgetNotFoundError as exc:
@@ -218,14 +367,15 @@ class FinanceToolExecutor:
 
     @staticmethod
     def _parse_tx_date(val: str | None) -> datetime | None:
-        if not val:
+        """Tanggal dari LLM dalam waktu lokal. Hari ini → None agar memakai jam sekarang."""
+        dt = parse_local_datetime(val)
+        if dt is None:
             return None
-        try:
-            return datetime.fromisoformat(val).replace(tzinfo=UTC)
-        except (ValueError, TypeError):
+        if "T" not in val and to_local(dt).date() == now_local().date():
             return None
+        return dt
 
-    async def _add_income(self, owner_jid: str, args: dict) -> str:
+    async def _add_income(self, owner_jid: str, args: dict, message_id: str | None = None) -> str:
         amount = Decimal(str(args["amount"]))
         account_name: str | None = args.get("account_name")
         account_id = None
@@ -245,13 +395,13 @@ class FinanceToolExecutor:
             category_name=args.get("category_name"),
             account_id=account_id,
             date=date,
-            idempotency_key=args.get("idempotency_key"),
+            idempotency_key=_idempotency_key(message_id, "finance_add_income", args),
         )
         current_acc = await self._svc._repo.get_account_by_id(tx.account_id, owner_jid)
         date_str = (
-            tx.transaction_date.strftime("%Y-%m-%d")
+            to_local(tx.transaction_date).strftime("%Y-%m-%d")
             if tx.transaction_date
-            else datetime.now(UTC).strftime("%Y-%m-%d")
+            else now_local().strftime("%Y-%m-%d")
         )
         return json.dumps({
             "status": "success",
@@ -269,7 +419,7 @@ class FinanceToolExecutor:
             ),
         }, ensure_ascii=False)
 
-    async def _add_expense(self, owner_jid: str, args: dict) -> str:
+    async def _add_expense(self, owner_jid: str, args: dict, message_id: str | None = None) -> str:
         amount = Decimal(str(args["amount"]))
         account_name: str | None = args.get("account_name")
         account_id = None
@@ -289,13 +439,15 @@ class FinanceToolExecutor:
             category_name=args.get("category_name"),
             account_id=account_id,
             date=date,
-            idempotency_key=args.get("idempotency_key"),
+            idempotency_key=_idempotency_key(message_id, "finance_add_expense", args),
         )
         current_acc = await self._svc._repo.get_account_by_id(tx.account_id, owner_jid)
+        alert = await self._svc.get_budget_alert(owner_jid, tx)
+        budget_alert = format_budget_alert(alert) if alert else None
         date_str = (
-            tx.transaction_date.strftime("%Y-%m-%d")
+            to_local(tx.transaction_date).strftime("%Y-%m-%d")
             if tx.transaction_date
-            else datetime.now(UTC).strftime("%Y-%m-%d")
+            else now_local().strftime("%Y-%m-%d")
         )
         return json.dumps({
             "status": "success",
@@ -308,12 +460,13 @@ class FinanceToolExecutor:
             "category_name": tx.category_name,
             "description": tx.description,
             "new_balance": float(current_acc.balance) if current_acc else None,
+            "budget_alert": budget_alert,
             "message": (
                 f"Pengeluaran Rp {int(amount):,} dari {tx.account_name} berhasil dicatat."
             ),
         }, ensure_ascii=False)
 
-    async def _transfer(self, owner_jid: str, args: dict) -> str:
+    async def _transfer(self, owner_jid: str, args: dict, message_id: str | None = None) -> str:
         amount = Decimal(str(args["amount"]))
         from_acc = await self._svc.find_account_by_name(owner_jid, args["from_account_name"])
         to_acc = await self._svc.find_account_by_name(owner_jid, args["to_account_name"])
@@ -331,14 +484,14 @@ class FinanceToolExecutor:
             to_account_id=to_acc.id,
             description=args.get("description"),
             date=date,
-            idempotency_key=args.get("idempotency_key"),
+            idempotency_key=_idempotency_key(message_id, "finance_transfer", args),
         )
         updated_from = await self._svc._repo.get_account_by_id(from_acc.id, owner_jid)
         updated_to = await self._svc._repo.get_account_by_id(to_acc.id, owner_jid)
         date_str = (
-            tx.transaction_date.strftime("%Y-%m-%d")
+            to_local(tx.transaction_date).strftime("%Y-%m-%d")
             if tx.transaction_date
-            else datetime.now(UTC).strftime("%Y-%m-%d")
+            else now_local().strftime("%Y-%m-%d")
         )
         return json.dumps({
             "status": "success",
@@ -399,13 +552,33 @@ class FinanceToolExecutor:
         }, ensure_ascii=False)
 
     async def _get_transactions(self, owner_jid: str, args: dict) -> str:
-        from datetime import datetime
 
+        # Tanpa date_from/date_to, riwayat default-nya bulan berjalan (WIB);
+        # period="last_month" untuk bulan lalu.
+        has_explicit_range = bool(args.get("date_from") or args.get("date_to"))
+        month_arg = args.get("month")
+        year_arg = args.get("year")
+        req_month: int | None = None
+        req_year: int | None = None
+        if not has_explicit_range and month_arg is not None:
+            try:
+                req_month = int(month_arg)
+                req_year = int(year_arg) if year_arg is not None else None
+            except (ValueError, TypeError):
+                req_month = 0
+            if not (1 <= req_month <= 12) or (
+                req_year is not None and not (2000 <= req_year <= 2100)
+            ):
+                return json.dumps(
+                    {"status": "error", "message": "Bulan harus 1-12 dan tahun 2000-2100."},
+                    ensure_ascii=False,
+                )
         limit_val = args.get("limit")
+        default_limit = 10 if has_explicit_range else 30
         try:
-            limit = min(int(limit_val), 30) if limit_val is not None else 10
+            limit = min(max(int(limit_val), 1), 30) if limit_val is not None else default_limit
         except (ValueError, TypeError):
-            limit = 10
+            limit = default_limit
 
         account_id = None
         account_name: str | None = args.get("account_name")
@@ -424,35 +597,56 @@ class FinanceToolExecutor:
                     category_id = c.id
                     break
 
-        # Parse date_from / date_to
-        def _parse_date(val: str | None):
-            if not val:
-                return None
-            try:
-                return datetime.fromisoformat(val).replace(tzinfo=UTC)
-            except (ValueError, TypeError):
-                return None
-
-        date_from = _parse_date(args.get("date_from"))
-        date_to = _parse_date(args.get("date_to"))
+        # date_from / date_to adalah tanggal lokal; date_to inklusif sampai akhir hari.
+        day_from = parse_local_date(args.get("date_from"))
+        day_to = parse_local_date(args.get("date_to"))
+        date_from = day_bounds_utc(day_from)[0] if day_from else None
+        date_to = day_bounds_utc(day_to)[1] - timedelta(microseconds=1) if day_to else None
         transaction_type: str | None = args.get("transaction_type")
 
+        period = "custom"
+        period_label: str | None = None
+        if not has_explicit_range:
+            today = now_local()
+            year, month = today.year, today.month
+            if req_month is not None:
+                # Tahun tidak disebut: tahun berjalan, atau tahun lalu bila bulan itu belum tiba.
+                month = req_month
+                year = req_year if req_year is not None else (
+                    today.year if req_month <= today.month else today.year - 1
+                )
+                period = "month"
+            elif str(args.get("period") or "").strip().lower() == "last_month":
+                period = "last_month"
+                year, month = (year - 1, 12) if month == 1 else (year, month - 1)
+            else:
+                period = "this_month"
+            start_utc, end_utc = month_bounds_utc(year, month)
+            date_from, date_to = start_utc, end_utc - timedelta(microseconds=1)
+            period_label = f"{year:04d}-{month:02d}"
+
+        # Ambil limit+1 untuk mendeteksi apakah hasil terpotong.
         transactions = await self._svc.get_recent_transactions(
             owner_jid,
-            limit=limit,
+            limit=limit + 1,
             account_id=account_id,
             transaction_type=transaction_type,
             date_from=date_from,
             date_to=date_to,
             category_id=category_id,
         )
+        truncated = len(transactions) > limit
+        transactions = transactions[:limit]
         return json.dumps({
             "status": "success",
+            "period": period,
+            "period_month": period_label,
+            "truncated": truncated,
             "count": len(transactions),
             "transactions": [
                 {
                     "transaction_id": tx.human_tx_id or tx.id,
-                    "date": tx.transaction_date.strftime("%Y-%m-%d"),
+                    "date": to_local(tx.transaction_date).strftime("%Y-%m-%d"),
                     "type": tx.transaction_type.value,
                     "amount": float(tx.amount),
                     "description": tx.description,
@@ -516,9 +710,8 @@ class FinanceToolExecutor:
             "balance": float(acc.balance),
         }, ensure_ascii=False)
 
-    async def _delete_account(self, owner_jid: str, args: dict) -> str:
+    async def _delete_account(self, owner_jid: str, args: dict, message_id: str | None = None) -> str:
         name: str = args["name"]
-        confirm: bool = bool(args.get("confirm", False))
 
         acc = await self._svc.find_account_by_name(owner_jid, name)
         if not acc:
@@ -527,7 +720,7 @@ class FinanceToolExecutor:
         if not acc:
             raise AccountNotFoundError(f"Rekening '{name}' tidak ditemukan.")
 
-        if not confirm:
+        if not self._confirmed_by_user(owner_jid, "delete_account", acc.id, message_id, args.get("confirm")):
             return json.dumps({
                 "status": "need_confirmation",
                 "account_name": acc.name,
@@ -575,15 +768,43 @@ class FinanceToolExecutor:
         return json.dumps({
             "status": "success",
             "income_categories": [
-                {"name": c.name, "icon": c.icon} for c in income_cats
+                {"name": c.name, "icon": c.icon, "custom": not c.is_default} for c in income_cats
             ],
             "expense_categories": [
-                {"name": c.name, "icon": c.icon} for c in expense_cats
+                {"name": c.name, "icon": c.icon, "custom": not c.is_default} for c in expense_cats
             ],
         }, ensure_ascii=False)
 
+    async def _create_category(self, owner_jid: str, args: dict) -> str:
+        category = await self._svc.create_category(
+            owner_jid,
+            name=str(args.get("name") or ""),
+            category_type=args.get("category_type") or "expense",
+            icon=args.get("icon"),
+        )
+        type_label = "pengeluaran" if category.category_type.value == "expense" else "pemasukan"
+        return json.dumps({
+            "status": "success",
+            "category": category.name,
+            "category_type": category.category_type.value,
+            "icon": category.icon,
+            "message": f"Kategori {type_label} '{category.name}' berhasil dibuat.",
+        }, ensure_ascii=False)
+
+    async def _delete_category(self, owner_jid: str, args: dict) -> str:
+        category = await self._svc.delete_category(
+            owner_jid,
+            name=str(args.get("name") or ""),
+            category_type=args.get("category_type"),
+        )
+        return json.dumps({
+            "status": "success",
+            "category": category.name,
+            "category_type": category.category_type.value,
+            "message": f"Kategori '{category.name}' berhasil dihapus.",
+        }, ensure_ascii=False)
+
     async def _get_transaction_detail(self, owner_jid: str, args: dict) -> str:
-        from datetime import datetime
 
         keyword: str | None = args.get("keyword")
         date_str: str | None = args.get("date")
@@ -594,12 +815,7 @@ class FinanceToolExecutor:
         except (ValueError, TypeError):
             limit = 5
 
-        date = None
-        if date_str:
-            try:
-                date = datetime.fromisoformat(date_str).replace(tzinfo=UTC)
-            except (ValueError, TypeError):
-                pass
+        date = parse_local_date(date_str)
 
         transactions = await self._svc.search_transactions(
             owner_jid,
@@ -622,7 +838,7 @@ class FinanceToolExecutor:
             "transactions": [
                 {
                     "transaction_id": tx.human_tx_id or tx.id,
-                    "date": tx.transaction_date.strftime("%Y-%m-%d"),
+                    "date": to_local(tx.transaction_date).strftime("%Y-%m-%d"),
                     "type": tx.transaction_type.value,
                     "amount": float(tx.amount),
                     "description": tx.description,
@@ -752,7 +968,7 @@ class FinanceToolExecutor:
             "account": corrected.account_name,
         }, ensure_ascii=False)
 
-    async def _delete_transaction(self, owner_jid: str, args: dict) -> str:
+    async def _delete_transaction(self, owner_jid: str, args: dict, message_id: str | None = None) -> str:
         from whatsapp_platform.features.finance.service import (
             TransactionNotFoundError,
         )
@@ -783,6 +999,22 @@ class FinanceToolExecutor:
                 }, ensure_ascii=False)
             else:
                 raise TransactionNotFoundError(f"Transaksi '{tx_id}' tidak ditemukan.")
+
+        tx_label = orig_tx.human_tx_id or tx_id
+        if not self._confirmed_by_user(owner_jid, "delete_transaction", orig_tx.id, message_id, args.get("confirm")):
+            return json.dumps({
+                "status": "need_confirmation",
+                "transaction_id": tx_label,
+                "transaction_type": orig_tx.transaction_type.value,
+                "description": orig_tx.description,
+                "amount": float(orig_tx.amount),
+                "account": orig_tx.account_name,
+                "message": (
+                    f"Transaksi {tx_label} ({orig_tx.description or orig_tx.transaction_type.value}, "
+                    f"Rp {int(orig_tx.amount):,}) akan dihapus dan saldo rekening dikembalikan. "
+                    "Tanyakan konfirmasi kepada pengguna sebelum memanggil tool ini dengan confirm=true."
+                ),
+            }, ensure_ascii=False)
 
         success = await self._svc.delete_transaction(owner_jid, tx_id)
         if success:
@@ -890,8 +1122,7 @@ class FinanceToolExecutor:
 
     async def _delete_budget(self, owner_jid: str, arguments: dict) -> str:
         import calendar
-        from datetime import UTC, datetime
-        now = datetime.now(UTC)
+        now = now_local()
 
         category_name: str = arguments.get("category_name", "")
         month: int = int(arguments.get("month") or now.month)
@@ -907,11 +1138,9 @@ class FinanceToolExecutor:
             ensure_ascii=False,
         )
 
-    async def _reset_data(self, owner_jid: str, arguments: dict) -> str:
+    async def _reset_data(self, owner_jid: str, arguments: dict, message_id: str | None = None) -> str:
         """Preview atau eksekusi reset semua data finance user."""
-        confirm: bool = bool(arguments.get("confirm", False))
-
-        if not confirm:
+        if not self._confirmed_by_user(owner_jid, "reset_data", "all", message_id, arguments.get("confirm")):
             # Preview saja — tidak menghapus
             preview = await self._svc.get_reset_preview(owner_jid)
             return json.dumps(

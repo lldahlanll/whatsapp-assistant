@@ -8,12 +8,14 @@ Creates and configures the FastAPI app with:
 """
 
 import time
+from typing import cast
 
 import structlog
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from whatsapp_platform.infrastructure.config.settings import Settings
 from whatsapp_platform.presentation.api.routers import (
     groups_router,
     health_router,
@@ -33,6 +35,12 @@ def create_api_app(container: object) -> FastAPI:
     Returns:
         Configured FastAPI app instance.
     """
+    try:
+        settings: Settings = container.resolve(Settings)  # type: ignore[attr-defined]
+    except Exception:
+        settings = Settings()
+    docs_enabled = settings.api_docs_enabled
+
     app = FastAPI(
         title="WhatsApp Platform API",
         description=(
@@ -40,22 +48,24 @@ def create_api_app(container: object) -> FastAPI:
             "Send messages, manage groups, query session status, and more."
         ),
         version="1.0.0",
-        docs_url="/docs",
-        redoc_url="/redoc",
-        openapi_url="/openapi.json",
+        docs_url="/docs" if docs_enabled else None,
+        redoc_url="/redoc" if docs_enabled else None,
+        openapi_url="/openapi.json" if docs_enabled else None,
     )
 
     # Attach the DI container to app state — accessible via request.app.state.container
     app.state.container = container
 
     # --- Middleware ---
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],  # Tighten in production via settings
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    cors_origins = cast(list[str], settings.api_cors_origins)
+    if cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=cors_origins,
+            allow_credentials=False,  # auth lewat header X-API-Key, bukan cookie
+            allow_methods=["GET", "POST", "PUT", "DELETE"],
+            allow_headers=["X-API-Key", "Content-Type"],
+        )
 
     # --- Request timing middleware ---
     @app.middleware("http")
@@ -78,7 +88,7 @@ def create_api_app(container: object) -> FastAPI:
         )
         return JSONResponse(
             status_code=500,
-            content={"success": False, "error": "Internal server error", "detail": str(exc)},
+            content={"success": False, "error": "Internal server error"},
         )
 
     # --- Register routers ---

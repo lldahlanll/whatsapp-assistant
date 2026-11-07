@@ -67,7 +67,10 @@ class CommandsFeature(IFeatureModule):
         router.register(PromoteHandler())
         router.register(DemoteHandler())
         router.register(SetNameHandler())
-        router.register(AIChatCommandHandler(config_store, ai_service))
+        from whatsapp_platform.features.ai.memory_store import UserMemoryStore
+
+        memory_store = container.resolve(UserMemoryStore) if settings.ai_memory_enabled else None
+        router.register(AIChatCommandHandler(config_store, ai_service, settings, memory_store))
 
         from whatsapp_platform.features.commands.handlers.network import NetworkCommandHandler
         from whatsapp_platform.features.network.permission import NetworkPermissionChecker
@@ -84,6 +87,14 @@ class CommandsFeature(IFeatureModule):
 
         finance_service = container.resolve(FinanceService)
         router.register(FinanceCommandHandler(finance_service))
+
+        if settings.scheduler_enabled:
+            from whatsapp_platform.features.commands.handlers.reminder import ReminderCommandHandler
+            from whatsapp_platform.features.scheduler.service import SchedulerService
+
+            scheduler_service = container.resolve(SchedulerService)
+            router.register(ReminderCommandHandler(scheduler_service, "pengingat"))
+            router.register(ReminderCommandHandler(scheduler_service, "reminder"))
 
         gateway.subscribe_event(MessageReceived, router.on_message_received)
 

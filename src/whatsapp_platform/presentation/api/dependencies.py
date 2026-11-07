@@ -4,6 +4,7 @@ Provides FastAPI Depends() functions that resolve use cases and config
 from the shared DI Container that was initialized by the Application class.
 """
 
+import secrets
 from typing import Annotated
 
 import structlog
@@ -66,17 +67,20 @@ async def verify_api_key(
 ) -> None:
     """API Key authentication dependency.
 
-    If API_KEY is configured in settings, all /api/v1/* requests must include
-    the correct X-API-Key header. If API_KEY is empty, auth is disabled.
+    All /api/v1/* requests must include the correct X-API-Key header.
+    Fail closed: if API_KEY is not configured, the protected endpoints are
+    unavailable instead of being open to anyone who can reach the port.
     """
     container: Container = request.app.state.container
     settings: Settings = container.resolve(Settings)
 
     if not settings.api_key:
-        # Auth disabled — allow all requests
-        return
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="REST API is disabled until API_KEY is configured.",
+        )
 
-    if x_api_key != settings.api_key:
+    if not secrets.compare_digest((x_api_key or "").encode(), settings.api_key.encode()):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing API key. Provide it via X-API-Key header.",

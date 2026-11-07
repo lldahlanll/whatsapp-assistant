@@ -7,7 +7,7 @@
 [![Architecture: Clean](https://img.shields.io/badge/architecture-Clean%20%2B%20DDD-orange.svg)](docs/05_architecture_overview.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-Platform **WhatsApp Assistant** production-grade berbasis **Python 3.12+** dan **Neonize**. Dilengkapi **AI Assistant multi-provider**, **manajemen keuangan pribadi**, **monitoring jaringan MikroTik**, **customer lookup**, dan **REST API** — semuanya dibangun dengan prinsip **Clean Architecture** & **DDD**.
+Platform **WhatsApp Assistant** production-grade berbasis **Python 3.12+** dan **Neonize**. Dilengkapi **AI Assistant multi-provider**, **manajemen keuangan pribadi**, **monitoring jaringan MikroTik**, dan **REST API** — semuanya dibangun dengan prinsip **Clean Architecture** & **DDD**.
 
 ---
 
@@ -33,6 +33,17 @@ Platform **WhatsApp Assistant** production-grade berbasis **Python 3.12+** dan *
 - **Natural language** — cukup ngobrol dengan AI untuk catat keuangan
 - **Command shortcut** — `!finance` untuk akses cepat
 
+### ⏰ Pengingat & Laporan Terjadwal
+- Bot mengirim pesan **proaktif** pada waktunya — cukup ngobrol: _"ingetin minum obat tiap hari jam 8"_, _"30 menit lagi ingetin angkat jemuran"_
+- Pengulangan: sekali, harian, hari kerja (Sen–Jum), mingguan, bulanan (tanggal 29–31 aman di bulan pendek)
+- **Laporan keuangan otomatis**: _"kirim laporan keuangan tiap senin jam 7"_ (chat pribadi saja)
+- Aman saat bot mati/WA putus: jadwal sekali jalan dikirim terlambat dengan keterangan, jadwal berulang yang basi (>6 jam) dilewati
+- **Command shortcut** — `!pengingat` (daftar), `!pengingat 08:00 harian minum obat`, `!pengingat hapus 2`
+- Batas 30 jadwal aktif per pengguna; nonaktifkan dengan `SCHEDULER_ENABLED=false`
+
+### 💰 Kategori Kustom Keuangan
+- Tambah kategori pemasukan/pengeluaran sendiri lalu pasang budget-nya: _"tambah kategori pengeluaran Kopi"_, `!finance kategori tambah keluar Kopi`
+
 ### 🌐 Monitoring Jaringan MikroTik
 - Monitoring kesehatan router (CPU, memory, uptime, disk)
 - Analisis traffic real-time per interface
@@ -51,12 +62,6 @@ Platform **WhatsApp Assistant** production-grade berbasis **Python 3.12+** dan *
 - Set nama group
 - Generate invite link
 - Semua via perintah `!group`, `!kick`, `!add`, `!promote`, `!demote`, `!setname`, `!invitelink`
-
-### 🔍 Customer Lookup
-- Lookup data pelanggan dari database MySQL eksternal
-- Deteksi otomatis nomor telepon dalam pesan
-- Whitelist group yang diizinkan
-- Rate limiting per pengirim
 
 ### 🌐 REST API (FastAPI)
 - `GET /health` — Health check
@@ -92,9 +97,9 @@ Platform **WhatsApp Assistant** production-grade berbasis **Python 3.12+** dan *
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌───────────────────┐  │
 │  │ Session  │ │Messaging │ │ Commands │ │   AI Assistant    │  │
 │  └──────────┘ └──────────┘ └──────────┘ └───────────────────┘  │
-│  ┌──────────┐ ┌──────────────┐ ┌────────────────────────────┐  │
-│  │ Finance  │ │Customer Lookup│ │  Network (MikroTik)       │  │
-│  └──────────┘ └──────────────┘ └────────────────────────────┘  │
+│  ┌──────────┐ ┌────────────────────────────┐                    │
+│  │ Finance  │ │  Network (MikroTik)        │                    │
+│  └──────────┘ └────────────────────────────┘                    │
 ├──────────────────────────────────────────────────────────────────┤
 │                      APPLICATION LAYER                          │
 │       (Use Cases, Event Bus, Feature Registry, AI Reply)        │
@@ -104,7 +109,7 @@ Platform **WhatsApp Assistant** production-grade berbasis **Python 3.12+** dan *
 ├──────────────────────────────────────────────────────────────────┤
 │                     INFRASTRUCTURE LAYER                        │
 │  (Neonize Gateway, SQLAlchemy Repos, AI Providers, MikroTik,   │
-│   MySQL Client, Config, Structured Logging)                     │
+│   Config, Structured Logging)                                   │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -188,6 +193,9 @@ Semua perintah diawali dengan prefix `!` (bisa dikustomisasi via `COMMAND_PREFIX
 | `!ai reset` | Reset konteks percakapan AI |
 | `!ai model <nama>` | Ganti model AI per-chat |
 | `!ai stats` | Statistik penggunaan LLM (daily counters, key pool) |
+| `!ai memori` | Lihat hal yang diingat AI tentangmu di chat ini |
+| `!ai ingat <fakta>` | Minta AI mengingat sesuatu (nama panggilan, preferensi, dll.) |
+| `!ai lupa <nomor\|teks\|semua>` | Hapus memori AI milikmu |
 
 ### Keuangan (`!finance`)
 
@@ -286,14 +294,12 @@ whatsapp-assistant/
 │   │   ├── commands/          # Command router & handlers
 │   │   ├── ai/                # AI auto-reply handler & config
 │   │   ├── finance/           # Personal finance service
-│   │   ├── customer_lookup/   # External MySQL customer lookup
 │   │   └── network/           # MikroTik network monitoring
 │   ├── infrastructure/
 │   │   ├── ai/                # AI providers (Gemini, Groq, OpenRouter, 9router)
 │   │   ├── neonize/           # WhatsApp gateway adapter
 │   │   ├── database/          # SQLAlchemy repos & Alembic migrations
 │   │   ├── mikrotik/          # MikroTik REST API client
-│   │   ├── customer_lookup/   # MySQL repository
 │   │   ├── finance/           # Finance tool schemas & executor
 │   │   ├── config/            # Pydantic Settings
 │   │   └── logging/           # Structured logging
@@ -335,7 +341,6 @@ whatsapp-assistant/
 - API key disimpan di `.env` (tidak di-commit ke git)
 - REST API dilindungi `X-API-Key` authentication
 - Network commands menggunakan JID whitelist
-- Customer lookup dibatasi per group
 - AI rate limiting per-chat untuk mencegah abuse
 - Per-chat privacy notice saat AI diaktifkan
 

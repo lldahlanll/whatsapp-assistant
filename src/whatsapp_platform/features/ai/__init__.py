@@ -12,6 +12,7 @@ from whatsapp_platform.domain.repositories.message_repository import IMessageRep
 from whatsapp_platform.features.ai.config_store import AIChatConfigStore
 from whatsapp_platform.features.ai.handler import AIMessageHandler
 from whatsapp_platform.features.ai.rate_guard import PerChatRateGuard
+from whatsapp_platform.infrastructure.ai.transcriber import GroqWhisperTranscriber
 from whatsapp_platform.infrastructure.config.settings import Settings
 
 logger = structlog.get_logger()
@@ -45,6 +46,7 @@ class AIFeature(IFeatureModule):
             settings=settings,
             message_repo=message_repo,
             gateway=gateway,
+            transcriber=container.resolve(GroqWhisperTranscriber),
         )
 
         gateway.subscribe_event(MessageReceived, self.handler.on_message_received)

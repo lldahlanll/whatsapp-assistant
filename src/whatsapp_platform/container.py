@@ -33,7 +33,10 @@ from whatsapp_platform.infrastructure.config.settings import Settings
 from whatsapp_platform.infrastructure.database.base import (
     create_engine_and_session_factory,
 )
-from whatsapp_platform.infrastructure.database.migration_backup import backup_before_migration
+from whatsapp_platform.infrastructure.database.migration_backup import (
+    backup_before_migration,
+    snapshot_database,
+)
 from whatsapp_platform.infrastructure.database.repositories.contact_repo import (
     SQLAlchemyContactRepository,
 )
@@ -182,8 +185,27 @@ class Container(IContainer):
                 "network": tools_model,
                 "full": tools_model,
                 "image": vision_model,
+                "memory": tools_model,
             }
         }
+
+        # Voice note: pool terpisah dari chat agar limit audio tidak mendinginkan key chat
+        from whatsapp_platform.infrastructure.ai.transcriber import GroqWhisperTranscriber
+
+        transcriber: GroqWhisperTranscriber | None = None
+        if self.settings.ai_voice_enabled and self.settings.groq_api_keys:
+            transcriber = GroqWhisperTranscriber(
+                self._http_client,
+                KeyPool(
+                    cast(list[str], self.settings.groq_api_keys),
+                    default_cooldown_seconds=self.settings.ai_cooldown_default_seconds,
+                ),
+                model=self.settings.ai_transcription_model,
+                language=self.settings.ai_transcription_language,
+                cooldown_default=self.settings.ai_cooldown_default_seconds,
+            )
+        elif self.settings.ai_voice_enabled:
+            logger.info("Voice note transcription disabled: GROQ_API_KEYS kosong")
 
         strategy = FixedPriorityStrategy(DEFAULT_PROVIDER_ORDER)
         ai_service = AIService(
@@ -232,7 +254,13 @@ class Container(IContainer):
         )
         from whatsapp_platform.infrastructure.finance.tool_executor import FinanceToolExecutor
 
-        finance_repo = SQLAlchemyFinanceRepository(session_factory)
+        project_root = Path(__file__).resolve().parents[2]
+        finance_repo = SQLAlchemyFinanceRepository(
+            session_factory,
+            pre_destructive_snapshot=lambda reason: snapshot_database(
+                self.settings.database_url, project_root, reason
+            ),
+        )
         finance_service = FinanceService(repo=finance_repo)
         finance_tool_executor = FinanceToolExecutor(finance_service=finance_service)
 
@@ -244,6 +272,49 @@ class Container(IContainer):
         composite_executor = CompositeToolExecutor()
         composite_executor.register("mikrotik", mikrotik_tool_executor)
         composite_executor.register("finance", finance_tool_executor)
+
+        from whatsapp_platform.features.ai.memory_store import MemoryLimits, UserMemoryStore
+        from whatsapp_platform.infrastructure.ai.memory_executor import MemoryToolExecutor
+
+        memory_store = UserMemoryStore(
+            db_store=ai_sqlite_store,
+            limits=MemoryLimits(
+                max_entries=self.settings.ai_memory_max_entries,
+                max_total_chars=self.settings.ai_memory_max_chars,
+            ),
+        )
+        await memory_store.initialize()
+        self.register(UserMemoryStore, memory_store)
+        if self.settings.ai_memory_enabled:
+            composite_executor.register("memory", MemoryToolExecutor(memory_store))
+
+        # Scheduler: pengingat & laporan terjadwal
+        from whatsapp_platform.features.scheduler.service import (
+            SchedulerService,
+            build_finance_report_text,
+        )
+        from whatsapp_platform.infrastructure.ai.reminder_executor import ReminderToolExecutor
+        from whatsapp_platform.infrastructure.database.repositories.schedule_repo import (
+            SQLAlchemyScheduleRepository,
+        )
+
+        async def _send_scheduled(chat_jid: str, text: str) -> None:
+            await send_msg_uc.execute(chat_jid, text)
+
+        async def _finance_report(owner_jid: str) -> str:
+            return await build_finance_report_text(finance_service, owner_jid)
+
+        scheduler_service = SchedulerService(
+            repo=SQLAlchemyScheduleRepository(session_factory),
+            send=_send_scheduled,
+            build_finance_report=_finance_report,
+        )
+        self.register(SchedulerService, scheduler_service)
+        if self.settings.scheduler_enabled:
+            composite_executor.register(
+                "reminder", ReminderToolExecutor(scheduler_service, is_group_admin=manage_group_uc.is_admin)
+            )
+
         self.register(CompositeToolExecutor, composite_executor)
 
         ai_reply_uc = AIReplyUseCase(
@@ -252,56 +323,33 @@ class Container(IContainer):
             tool_executor=composite_executor,
             context_window_messages=self.settings.ai_context_window_messages,
             max_context_chars=self.settings.ai_max_context_chars,
+            memory_store=memory_store,
         )
 
-        ai_config_store = AIChatConfigStore(db_store=ai_sqlite_store)
+        ai_config_store = AIChatConfigStore(
+            db_store=ai_sqlite_store, default_enabled=self.settings.ai_default_enabled
+        )
         await ai_config_store.initialize()
 
         ai_rate_guard = PerChatRateGuard(
             max_requests=self.settings.ai_rate_limit_max_requests,
             window_seconds=self.settings.ai_rate_limit_window_seconds,
+            per_user_max_requests=self.settings.ai_rate_limit_per_user_max_requests,
         )
 
         self.register(AISQLiteStore, ai_sqlite_store)
+        self.register(GroqWhisperTranscriber, transcriber)
         self.register(AIService, ai_service)
         self.register(AIReplyUseCase, ai_reply_uc)
         self.register(AIChatConfigStore, ai_config_store)
         self.register(PerChatRateGuard, ai_rate_guard)
 
-        from whatsapp_platform.features.customer_lookup import CustomerLookupFeature
-        from whatsapp_platform.features.customer_lookup.handler import CustomerLookupHandler
-        from whatsapp_platform.features.customer_lookup.rate_guard import PerSenderRateGuard
-        from whatsapp_platform.infrastructure.customer_lookup import (
-            CustomerLookupRepository,
-        )
-
-        customer_lookup_repo = CustomerLookupRepository(settings=self.settings)
-        customer_lookup_guard = PerSenderRateGuard()
-        customer_lookup_handler = CustomerLookupHandler(
-            repository=customer_lookup_repo,
-            send_msg_uc=send_msg_uc,
-            rate_guard=customer_lookup_guard,
-            settings=self.settings,
-        )
-        customer_lookup_feature = CustomerLookupFeature(handler=customer_lookup_handler)
-
-        self.register(CustomerLookupRepository, customer_lookup_repo)
-        self.register(PerSenderRateGuard, customer_lookup_guard)
-        self.register(CustomerLookupHandler, customer_lookup_handler)
-        self.register(CustomerLookupFeature, customer_lookup_feature)
-
         feature_registry = FeatureRegistry()
         self.register(FeatureRegistry, feature_registry)
 
     async def teardown(self) -> None:
-        """Cleanup resources allocated by container (HTTP client, SQLite, MySQL pool, MikroTik)."""
-        from whatsapp_platform.infrastructure.customer_lookup import close_pool
+        """Cleanup resources allocated by container (HTTP client, SQLite, MikroTik)."""
         from whatsapp_platform.infrastructure.mikrotik.client import MikroTikRestClient
-
-        try:
-            await close_pool()
-        except Exception as exc:
-            logger.warning("Error closing MySQL pool during teardown", error=str(exc))
 
         if MikroTikRestClient in self._services:
             mikrotik_client: MikroTikRestClient = self.resolve(MikroTikRestClient)

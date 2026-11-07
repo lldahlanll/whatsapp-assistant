@@ -49,12 +49,6 @@ FINANCE_TOOLS: list[ToolDefinition] = [
                 description="Tanggal transaksi (format: YYYY-MM-DD, misal: '2026-08-20'). Kosongkan jika transaksi hari ini.",
                 required=False,
             ),
-            ToolParameter(
-                name="idempotency_key",
-                type="string",
-                description="ID pesan unik untuk mencegah transaksi ganda (opsional).",
-                required=False,
-            ),
         ],
     ),
     ToolDefinition(
@@ -101,12 +95,6 @@ FINANCE_TOOLS: list[ToolDefinition] = [
                 description="Tanggal transaksi (format: YYYY-MM-DD, misal: '2026-08-20'). Kosongkan jika transaksi hari ini.",
                 required=False,
             ),
-            ToolParameter(
-                name="idempotency_key",
-                type="string",
-                description="ID pesan unik untuk mencegah transaksi ganda (opsional).",
-                required=False,
-            ),
         ],
     ),
     ToolDefinition(
@@ -144,12 +132,6 @@ FINANCE_TOOLS: list[ToolDefinition] = [
                 name="date",
                 type="string",
                 description="Tanggal transaksi (format: YYYY-MM-DD, misal: '2026-08-20'). Kosongkan jika transaksi hari ini.",
-                required=False,
-            ),
-            ToolParameter(
-                name="idempotency_key",
-                type="string",
-                description="ID pesan unik untuk mencegah transaksi ganda (opsional).",
                 required=False,
             ),
         ],
@@ -195,7 +177,7 @@ FINANCE_TOOLS: list[ToolDefinition] = [
             ToolParameter(
                 name="limit",
                 type="integer",
-                description="Jumlah transaksi yang ditampilkan (default 10, maksimal 30).",
+                description="Jumlah transaksi yang ditampilkan (default 30 untuk riwayat sebulan, maksimal 30).",
                 required=False,
             ),
             ToolParameter(
@@ -208,6 +190,32 @@ FINANCE_TOOLS: list[ToolDefinition] = [
                 name="transaction_type",
                 type="string",
                 description="Filter tipe transaksi: 'income', 'expense', atau 'transfer' (opsional).",
+                required=False,
+            ),
+            ToolParameter(
+                name="month",
+                type="integer",
+                description=(
+                    "Bulan tertentu (1-12) untuk riwayat sebulan penuh, misalnya 1 untuk Januari. "
+                    "Gunakan ini bila pengguna menyebut nama bulan selain bulan ini/bulan lalu. "
+                    "Jangan hitung tanggal sendiri."
+                ),
+                required=False,
+            ),
+            ToolParameter(
+                name="year",
+                type="integer",
+                description="Tahun untuk 'month' (opsional; kosong = tahun yang paling masuk akal).",
+                required=False,
+            ),
+            ToolParameter(
+                name="period",
+                type="string",
+                description=(
+                    "Periode riwayat bila date_from/date_to tidak diisi: 'this_month' "
+                    "(default, bulan berjalan) atau 'last_month' (hanya jika pengguna "
+                    "meminta bulan lalu)."
+                ),
                 required=False,
             ),
             ToolParameter(
@@ -329,6 +337,59 @@ FINANCE_TOOLS: list[ToolDefinition] = [
         ],
     ),
     ToolDefinition(
+        name="finance_create_category",
+        description=(
+            "Membuat kategori pemasukan/pengeluaran BARU milik pengguna. "
+            "Gunakan saat pengguna meminta menambah kategori, misal: 'tambah kategori pengeluaran Kopi', "
+            "'buat kategori pemasukan Sewa Kos', 'bikin kategori Skincare'. "
+            "Juga tawarkan/gunakan bila pengguna ingin budget atau transaksi untuk kategori yang belum ada "
+            "dan pengguna setuju membuatnya. Jangan membuat kategori tanpa permintaan pengguna."
+        ),
+        parameters=[
+            ToolParameter(
+                name="name",
+                type="string",
+                description="Nama kategori baru (misal: 'Kopi', 'Skincare', 'Sewa Kos').",
+                required=True,
+            ),
+            ToolParameter(
+                name="category_type",
+                type="string",
+                description="Tipe kategori: 'expense' (pengeluaran) atau 'income' (pemasukan). Default 'expense'.",
+                required=False,
+                enum=["expense", "income"],
+            ),
+            ToolParameter(
+                name="icon",
+                type="string",
+                description="Emoji ikon kategori (opsional, misal '☕').",
+                required=False,
+            ),
+        ],
+    ),
+    ToolDefinition(
+        name="finance_delete_category",
+        description=(
+            "Menghapus kategori buatan pengguna. Kategori default dan kategori yang masih dipakai "
+            "transaksi/budget tidak bisa dihapus. Contoh: 'hapus kategori Kopi'."
+        ),
+        parameters=[
+            ToolParameter(
+                name="name",
+                type="string",
+                description="Nama kategori yang akan dihapus.",
+                required=True,
+            ),
+            ToolParameter(
+                name="category_type",
+                type="string",
+                description="'expense' atau 'income'. Isi hanya jika nama yang sama ada di kedua tipe.",
+                required=False,
+                enum=["expense", "income"],
+            ),
+        ],
+    ),
+    ToolDefinition(
         name="finance_get_transaction_detail",
         description=(
             "Mencari dan mengambil detail transaksi berdasarkan kata kunci deskripsi atau tanggal. "
@@ -409,6 +470,7 @@ FINANCE_TOOLS: list[ToolDefinition] = [
             "Menghapus transaksi dari catatan keuangan. "
             "HARUS menggunakan transaction_id yang diperoleh dari finance_get_transaction_detail. "
             "Jangan menghapus berdasarkan deskripsi secara langsung — selalu resolve dulu. "
+            "Panggilan pertama hanya meminta konfirmasi; hapus terjadi setelah pengguna mengonfirmasi. "
             "Contoh: 'hapus transaksi kopi tadi', 'batalkan pencatatan makan siang kemarin'."
         ),
         parameters=[
@@ -418,6 +480,12 @@ FINANCE_TOOLS: list[ToolDefinition] = [
                 description="ID transaksi yang akan dihapus (human ID seperti TXN-20260820-ABC123 atau UUID).",
                 required=True,
             ),
+            ToolParameter(
+                name="confirm",
+                type="boolean",
+                description="Set true jika pengguna sudah memberikan konfirmasi eksplisit untuk menghapus transaksi.",
+                required=False,
+            ),
         ],
     ),
     # ── BUDGET TOOLS ──────────────────────────────────────────────────────────
@@ -426,7 +494,9 @@ FINANCE_TOOLS: list[ToolDefinition] = [
         description=(
             "Membuat atau memperbarui (upsert) budget / anggaran pengeluaran untuk kategori tertentu. "
             "Contoh: 'Budget makan bulan ini 1 juta', 'Buat budget transport 500rb bulan ini', "
-            "'Atur budget hiburan 300rb'."
+            "'Atur budget hiburan 300rb'. Budget otomatis berulang tiap bulan sampai dihapus. "
+            "Bisa untuk kategori default maupun kategori buatan pengguna. Jika hasilnya CATEGORY_NOT_FOUND, "
+            "tawarkan membuat kategori itu dulu dengan finance_create_category."
         ),
         parameters=[
             ToolParameter(

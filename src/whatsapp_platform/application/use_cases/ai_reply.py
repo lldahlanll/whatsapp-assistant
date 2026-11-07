@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import re
 import uuid
-from typing import TYPE_CHECKING
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -18,6 +20,15 @@ from whatsapp_platform.domain.value_objects.message_content import (
     TextContent,
 )
 from whatsapp_platform.infrastructure.ai.ai_service import AIService
+from whatsapp_platform.infrastructure.ai.claim_guard import (
+    UNBACKED_CLAIM_REPLY,
+    UNBACKED_FINANCE_NOTE,
+    UNBACKED_REMINDER_NOTE,
+    UNBACKED_REMINDER_REPLY,
+    is_unbacked_finance_action_claim,
+    is_unbacked_finance_claim,
+    is_unbacked_reminder_claim,
+)
 from whatsapp_platform.infrastructure.ai.constants import (
     AI_IMAGE_DEFAULT_MIME_TYPE,
     AI_IMAGE_DEFAULT_PROMPT,
@@ -31,8 +42,10 @@ from whatsapp_platform.infrastructure.ai.interfaces import (
     ProviderMessage,
 )
 from whatsapp_platform.infrastructure.config.settings import Settings
+from whatsapp_platform.shared.utils.timezone import now_local
 
 if TYPE_CHECKING:
+    from whatsapp_platform.features.ai.memory_store import UserMemoryStore
     from whatsapp_platform.infrastructure.ai.composite_executor import CompositeToolExecutor
     from whatsapp_platform.infrastructure.mikrotik.tool_executor import MikroTikToolExecutor
 
@@ -65,6 +78,37 @@ def strip_emojis(text: str) -> str:
     return "\n".join(cleaned_lines).strip()
 
 
+def _current_date_note() -> str:
+    """Tanggal lokal hari ini, agar LLM bisa menghitung 'kemarin', '3 hari lalu', dst."""
+    today = now_local()
+    return (
+        f"Today is {today.strftime('%A')}, {today.strftime('%Y-%m-%d')} "
+        "(Asia/Jakarta time, WIB). Resolve relative dates such as 'hari ini', 'kemarin', "
+        "or '3 hari lalu' from this date."
+    )
+
+
+class _ToolRunRecorder:
+    """Membungkus executor untuk satu giliran: mencatat tool yang sukses dijalankan."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.succeeded: set[str] = set()
+
+    @property
+    def is_enabled(self) -> bool:
+        return bool(getattr(self._inner, "is_enabled", True))
+
+    async def execute(self, tool_name: str, *args: Any, **kwargs: Any) -> str:
+        result = await self._inner.execute(tool_name, *args, **kwargs)
+        try:
+            if json.loads(result).get("status") == "success":
+                self.succeeded.add(tool_name)
+        except (TypeError, ValueError, AttributeError):
+            pass
+        return result
+
+
 def _escape_role_spoof(text: str) -> str:
     return _ROLE_SPOOF_PATTERN.sub(lambda m: m.group(0).rstrip(":") + ":\u200b", text)
 
@@ -82,6 +126,11 @@ def _extract_image(msg: Message) -> ImagePart | None:
             mime_type=content.mime_type or AI_IMAGE_DEFAULT_MIME_TYPE,
         )
     return None
+
+
+def _as_utc(ts: datetime) -> datetime:
+    """Timestamp dari DB bisa naive (disimpan sebagai UTC)."""
+    return ts if ts.tzinfo else ts.replace(tzinfo=UTC)
 
 
 def _message_to_provider_role(msg: Message) -> ProviderMessage:
@@ -106,6 +155,7 @@ class AIReplyUseCase:
         context_window_messages: int = 20,
         max_context_chars: int = 16000,
         settings: Settings | None = None,
+        memory_store: UserMemoryStore | None = None,
     ) -> None:
         self._ai_service = ai_service
         self._get_conv_uc = get_conv_uc
@@ -113,14 +163,19 @@ class AIReplyUseCase:
         self._context_window_messages = context_window_messages
         self._max_context_chars = max_context_chars
         self._settings = settings or Settings()
+        self._memory_store = memory_store if self._settings.ai_memory_enabled else None
 
     async def execute(
         self,
         chat_jid_str: str,
         trigger_message: Message,
         model_override: str | None = None,
+        history_since: datetime | None = None,
     ) -> AIResponse:
-        """Generate an AI reply for the trigger message in the given chat."""
+        """Generate an AI reply for the trigger message in the given chat.
+
+        history_since: pesan yang lebih lama dari waktu ini diabaikan (hasil !ai reset).
+        """
         image = _extract_image(trigger_message)
         if isinstance(trigger_message.content, TextContent):
             trigger_text = trigger_message.content.text
@@ -154,10 +209,12 @@ class AIReplyUseCase:
                 try:
                     recent = await self._get_conv_uc.execute(chat_jid_str, limit=2)
                     for prev_msg in recent:
+                        if history_since is not None and _as_utc(prev_msg.timestamp) <= history_since:
+                            continue
                         if prev_msg.direction == MessageDirection.OUTBOUND or prev_msg.is_from_me:
                             prev_txt = prev_msg.content.text if isinstance(prev_msg.content, TextContent) else ""
                             prev_low = prev_txt.lower()
-                            if any(k in prev_low for k in ("konfirmasi", "yakin", "rekening", "transaksi", "saldo", "budget", "anggaran", "hapus")):
+                            if any(k in prev_low for k in ("konfirmasi", "yakin", "rekening", "transaksi", "saldo", "budget", "anggaran", "kategori", "hapus")):
                                 intent = "finance"
                                 logger.info("Inherited 'finance' intent from previous confirmation prompt", chat=chat_jid_str)
                                 break
@@ -176,6 +233,8 @@ class AIReplyUseCase:
             settings=self._settings,
             tools_enabled=tools_available and image is None,
             is_group=is_group,
+            memory_enabled=self._memory_store is not None,
+            reminders_enabled=self._settings.scheduler_enabled,
         )
 
         # 3. Fetch DB conversation history using policy.history_limit (with fallback guard)
@@ -186,6 +245,8 @@ class AIReplyUseCase:
                     chat_jid_str, limit=policy.history_limit
                 )
                 history = list(reversed(history))  # oldest → newest
+                if history_since is not None:
+                    history = [m for m in history if _as_utc(m.timestamp) > history_since]
             except Exception as exc:
                 logger.warning(
                     "Failed to fetch conversation history, proceeding without history",
@@ -205,8 +266,12 @@ class AIReplyUseCase:
             tool_count=len(policy.tools) if policy.tools else 0,
         )
 
+        system_content = f"{policy.system_prompt}\n\n{_current_date_note()}"
+        memory_block = await self._render_memory(chat_jid_str, trigger_message)
+        if memory_block:
+            system_content = f"{system_content}\n\n{memory_block}"
         messages: list[ProviderMessage] = [
-            ProviderMessage(role="system", content=policy.system_prompt),
+            ProviderMessage(role="system", content=system_content),
         ]
 
         # Add DB history (excludes the trigger message which is appended below)
@@ -233,11 +298,13 @@ class AIReplyUseCase:
         request_id = uuid.uuid4().hex[:12]
 
         # 4. Delegate to AIService with selected tools
+        recorder: _ToolRunRecorder | None = None
         if policy.tools and self._tool_executor:
+            recorder = _ToolRunRecorder(self._tool_executor)
             response = await self._ai_service.generate_reply_with_tools(
                 chat_jid=chat_jid_str,
                 messages=messages,
-                tool_executor=self._tool_executor,
+                tool_executor=recorder,
                 tools=policy.tools,
                 user_jid=trigger_message.sender_jid,
                 wa_chat_jid=trigger_message.chat_jid,
@@ -246,6 +313,8 @@ class AIReplyUseCase:
                 max_tool_result_chars=self._settings.ai_max_tool_result_chars,
                 intent=policy.intent,
                 request_id=request_id,
+                message_id=trigger_message.id,
+                user_text=trigger_text,
             )
         else:
             response = await self._ai_service.generate_reply(
@@ -255,6 +324,14 @@ class AIReplyUseCase:
                 intent=policy.intent,
                 request_id=request_id,
             )
+            # Tanpa tool, klaim "berhasil dicatat" untuk pesan finance pasti karangan LLM.
+            if is_unbacked_finance_claim(trigger_text, response.text):
+                logger.warning("Blocked unbacked finance success claim", chat=chat_jid_str, intent=policy.intent)
+                response.text = UNBACKED_CLAIM_REPLY
+
+        response.text = self._guard_unbacked_claims(
+            trigger_text, response.text, recorder.succeeded if recorder else set(), chat_jid_str, policy.intent
+        )
 
         # 5. Persist trigger and AI reply to the context cache
         # Bytes gambar tidak disimpan ke konteks; cukup penanda teks.
@@ -270,6 +347,45 @@ class AIReplyUseCase:
 
         return response
 
+
+    @staticmethod
+    def _guard_unbacked_claims(
+        user_text: str | None, reply: str, succeeded: set[str], chat: str, intent: str
+    ) -> str:
+        """Ganti/tandai klaim sukses yang tidak didukung tool sukses di giliran ini.
+
+        Jika ada tool lain yang benar-benar sukses, balasan TIDAK diganti (agar konfirmasi yang benar
+        tetap terlihat dan user tidak mengulang -> data dobel), cukup ditambah catatan peringatan.
+        """
+        if not reply:
+            return reply
+        notes: list[str] = []
+        finance_saved = any(name.startswith("finance_") for name in succeeded)
+        if not finance_saved and is_unbacked_finance_action_claim(user_text, reply):
+            logger.warning("Blocked unbacked finance action claim", chat=chat, intent=intent)
+            if not succeeded:
+                return UNBACKED_CLAIM_REPLY
+            notes.append(UNBACKED_FINANCE_NOTE)
+        # Janji "pengingat diset" tanpa reminder_create yang sukses = pesan tidak akan pernah terkirim.
+        if "reminder_create" not in succeeded and is_unbacked_reminder_claim(user_text, reply):
+            logger.warning("Blocked unbacked reminder claim", chat=chat, intent=intent)
+            if not succeeded:
+                return UNBACKED_REMINDER_REPLY
+            notes.append(UNBACKED_REMINDER_NOTE)
+        return "\n\n".join([reply, *notes]) if notes else reply
+
+    async def _render_memory(self, chat_jid_str: str, trigger_message: Message) -> str:
+        """Blok memori pengguna untuk system prompt; gagal baca memori tidak menggagalkan balasan."""
+        if self._memory_store is None:
+            return ""
+        try:
+            block = await self._memory_store.render_for_prompt(
+                chat_jid_str, str(trigger_message.sender_jid)
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to load user memory", chat=chat_jid_str, error=str(exc))
+            return ""
+        return _escape_role_spoof(block)
 
     def _truncate_to_char_budget(
         self, messages: list[Message], chat_jid_str: str

@@ -70,13 +70,6 @@ GEMINI_API_KEYS=["YOUR_REAL_KEY"]
 GROQ_API_KEYS=["YOUR_REAL_KEY"]
 OPENROUTER_API_KEYS=["YOUR_REAL_KEY"]
 
-# MySQL
-MYSQL_HOST="your-db-host"
-MYSQL_USER="your-user"
-MYSQL_PASSWORD="your-password"
-MYSQL_DB="your-database"
-MYSQL_ROOT_PASSWORD="your-root-password"
-
 # MikroTik (jika digunakan)
 MIKROTIK_HOST="your-router-ip"
 MIKROTIK_USERNAME="your-user"
@@ -124,6 +117,23 @@ docker stats whatsapp-platform
 
 ---
 
+### Log permanen
+
+`docker logs` ikut hilang setiap container dibuat ulang (setiap deploy). Salinan permanen ditulis ke volume
+`app_logs` sebagai `logs/app.log` (satu baris JSON per event, dirotasi 10 MB × 10 file, ±110 MB maksimum):
+
+```bash
+# 50 baris terakhir
+docker exec whatsapp-platform tail -n 50 /app/logs/app.log
+
+# Hanya error, termasuk file lama hasil rotasi
+docker exec whatsapp-platform sh -c 'cat /app/logs/app.log* | grep "\"level\": \"error\""'
+```
+
+Atur lewat `LOG_FILE_PATH`, `LOG_FILE_MAX_BYTES`, `LOG_FILE_BACKUP_COUNT` di `.env.docker` (kosongkan `LOG_FILE_PATH` untuk mematikan).
+
+---
+
 ## 7. Update Berikutnya (tanpa migrasi manual)
 
 Di VPS cukup jalankan:
@@ -155,6 +165,29 @@ docker compose run --rm --no-deps --entrypoint sh app -c 'cp /app/storage/backup
 ./scripts/deploy.sh --rollback
 ```
 
+> **Setelah restore**, hapus file pendamping WAL agar tidak tertimpa data lama:
+> `rm -f /app/storage/session.db-wal /app/storage/session.db-shm` (DB utama memakai mode WAL).
+
+#### Snapshot otomatis sebelum reset data finance
+
+Sebelum `reset` data finance dijalankan, aplikasi membuat snapshot di `storage/backups/snapshots/`
+(`session-pre-reset-<waktu>.db`, 10 terbaru disimpan). Jika snapshot gagal, reset dibatalkan.
+Untuk memulihkan, hentikan app lalu salin snapshot ke `storage/session.db` (dan hapus file `-wal`/`-shm`).
+
+> **Catatan WAL:** saat menyalin DB secara manual saat app berjalan, salin juga `session.db-wal`,
+> atau gunakan perintah backup SQLite (`sqlite3 session.db ".backup out.db"`).
+
+#### Pengecekan konsistensi data finance
+
+Skrip baca-saja untuk memeriksa saldo vs transaksi, saldo minus, referensi yatim, serta kategori/idempotency_key ganda:
+
+```bash
+docker compose run --rm --no-deps --entrypoint python app scripts/reconcile_finance.py /app/storage/session.db
+```
+
+Exit code 0 = bersih, 1 = ada temuan. Jalankan sebelum dan sesudah deploy yang menyentuh skema finance.
+(Pastikan folder `scripts/` ikut di image, atau jalankan dari host terhadap salinan DB.)
+
 ### Aturan saat development (di local)
 
 Setiap kali mengubah model di `infrastructure/database/models.py`, buat file migrasi lalu commit bersama perubahan model:
@@ -174,7 +207,8 @@ Agar update aman tanpa downtime saat rollback, usahakan migrasi bersifat *additi
 > **JANGAN PERNAH** commit file `.env` atau `.env.docker` ke Git.  
 > Keduanya sudah masuk `.gitignore`.
 
-- Gunakan password yang kuat untuk MySQL dan API Keys
-- Set `API_KEY` di `.env.docker` untuk proteksi REST API
+- Gunakan password yang kuat untuk API Keys
+- Set `API_KEY` di `.env.docker`; tanpa itu endpoint `/api/v1/*` ditolak (503)
+- Port API di-publish hanya ke `127.0.0.1` secara default. Untuk akses dari luar set `API_BIND=0.0.0.0` di `.env` compose, dan taruh di belakang reverse proxy TLS (HTTP polos mengirim API key tanpa enkripsi)
 - Pertimbangkan firewall untuk membatasi akses port `8077` hanya dari IP tertentu
 - Rotate API keys secara berkala

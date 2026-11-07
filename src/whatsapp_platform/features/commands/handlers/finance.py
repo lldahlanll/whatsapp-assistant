@@ -10,7 +10,9 @@ from whatsapp_platform.features.commands.base import BaseCommandHandler
 from whatsapp_platform.features.commands.context import CommandContext
 from whatsapp_platform.features.finance.formatter import (
     format_accounts_list,
+    format_audit_log,
     format_balance,
+    format_budget_alert,
     format_budget_list,
     format_budget_progress,
     format_finance_error,
@@ -25,6 +27,28 @@ from whatsapp_platform.features.finance.parser import (
 from whatsapp_platform.features.finance.service import (
     FinanceService,
     FinanceServiceError,
+    InsufficientBalanceError,
+)
+from whatsapp_platform.shared.utils.timezone import now_local
+
+_INCOME_SUBCOMMANDS = ("masuk", "income", "pemasukan", "in", "tambah", "topup", "top-up")
+_EXPENSE_SUBCOMMANDS = ("keluar", "expense", "pengeluaran", "out")
+_TRANSFER_SUBCOMMANDS = ("transfer", "tf", "trf")
+
+# Di grup hanya pencatatan yang diizinkan (balasannya tidak memuat saldo),
+# selaras dengan GROUP_BLOCKED_TOOLS di jalur AI.
+_GROUP_ALLOWED_SUBCOMMANDS = frozenset(
+    _INCOME_SUBCOMMANDS + _EXPENSE_SUBCOMMANDS + _TRANSFER_SUBCOMMANDS
+)
+
+_CATEGORY_TYPE_WORDS: dict[str, str] = {
+    "keluar": "expense", "pengeluaran": "expense", "expense": "expense",
+    "masuk": "income", "pemasukan": "income", "income": "income",
+}
+
+_GROUP_PRIVATE_ONLY_TEXT = (
+    "Data keuangan pribadi hanya bisa dilihat dan dikelola lewat chat pribadi.\n"
+    "Di grup kamu hanya bisa mencatat transaksi (`masuk`, `keluar`, `transfer`)."
 )
 
 _HELP_TEXT = (
@@ -42,11 +66,20 @@ _HELP_TEXT = (
     "*Transfer:*\n"
     "  `!finance transfer 100rb BCA BRI`\n"
     "\n"
+    "*Kategori:*\n"
+    "  `!finance kategori` — daftar kategori\n"
+    "  `!finance kategori tambah keluar Kopi` — kategori pengeluaran baru\n"
+    "  `!finance kategori tambah masuk Sewa Kos` — kategori pemasukan baru\n"
+    "  `!finance kategori hapus Kopi` — hapus kategori buatan sendiri\n"
+    "  _Setelah dibuat, kategori bisa dipakai untuk transaksi & budget._\n"
+    "\n"
     "*Budget / Anggaran:*\n"
     "  `!finance budget` — lihat semua budget bulan ini\n"
-    "  `!finance budget makan 1jt` — atur budget kategori\n"
+    "  `!finance budget makan 1jt` — atur budget (otomatis berulang tiap bulan)\n"
     "  `!finance budget makan` — cek progres budget\n"
-    "  `!finance budget hapus makan` — hapus budget\n"
+    "  `!finance budget hapus makan` — hapus budget & hentikan perulangan\n"
+    "  `!finance dihapus` — riwayat data yang dihapus (transaksi, rekening, budget)\n"
+    "  _Bot memberi peringatan saat pemakaian budget melewati 80% dan 100%._\n"
     "\n"
     "*Saldo & Laporan:*\n"
     "  `!finance saldo` — lihat semua saldo\n"
@@ -78,6 +111,11 @@ _HELP_TEXT = (
 )
 
 
+def _command_idempotency_key(ctx: CommandContext) -> str | None:
+    """Event pesan yang sama diproses dua kali tidak boleh mencatat transaksi dua kali."""
+    return f"cmd:{ctx.message.id[:64]}" if ctx.message.id else None
+
+
 class FinanceCommandHandler(BaseCommandHandler):
 
     def __init__(self, finance_service: FinanceService) -> None:
@@ -101,18 +139,23 @@ class FinanceCommandHandler(BaseCommandHandler):
 
         sub = args[0].lower()
         rest = args[1:]
+        is_group = ctx.message.chat_jid.is_group
+
+        if is_group and sub not in _GROUP_ALLOWED_SUBCOMMANDS:
+            await ctx.reply(_GROUP_PRIVATE_ONLY_TEXT)
+            return
 
         try:
             if sub in ("saldo", "balance", "kas"):
                 await self._handle_balance(ctx, owner_jid)
 
-            elif sub in ("masuk", "income", "pemasukan", "in", "tambah", "topup", "top-up"):
+            elif sub in _INCOME_SUBCOMMANDS:
                 await self._handle_income(ctx, owner_jid, rest)
 
-            elif sub in ("keluar", "expense", "pengeluaran", "out"):
+            elif sub in _EXPENSE_SUBCOMMANDS:
                 await self._handle_expense(ctx, owner_jid, rest)
 
-            elif sub in ("transfer", "tf", "trf"):
+            elif sub in _TRANSFER_SUBCOMMANDS:
                 await self._handle_transfer(ctx, owner_jid, rest)
 
             elif sub in ("riwayat", "history", "transaksi", "tx"):
@@ -125,10 +168,13 @@ class FinanceCommandHandler(BaseCommandHandler):
                 await self._handle_account(ctx, owner_jid, rest)
 
             elif sub in ("kategori", "category", "categories", "cat"):
-                await self._handle_categories(ctx, owner_jid)
+                await self._handle_categories(ctx, owner_jid, rest)
 
             elif sub in ("budget", "anggaran"):
                 await self._handle_budget(ctx, owner_jid, rest)
+
+            elif sub in ("dihapus", "deleted", "audit", "sampah"):
+                await self._handle_audit(ctx, owner_jid, rest)
 
             elif sub in ("reset", "hapus_semua", "clear_all"):
                 await self._handle_reset(ctx, owner_jid, rest)
@@ -139,6 +185,13 @@ class FinanceCommandHandler(BaseCommandHandler):
                     "Ketik `!finance help` untuk melihat panduan penggunaan."
                 )
 
+        except InsufficientBalanceError as exc:
+            # Pesan asli memuat nominal saldo; jangan bocorkan di grup.
+            await ctx.reply(
+                "Saldo rekening tidak mencukupi. Cek detail saldo lewat chat pribadi."
+                if is_group
+                else format_finance_error(exc)
+            )
         except FinanceServiceError as exc:
             await ctx.reply(format_finance_error(exc))
         except Exception as exc:
@@ -199,6 +252,7 @@ class FinanceCommandHandler(BaseCommandHandler):
             amount=amount,
             description=description,
             account_id=account_id,
+            idempotency_key=_command_idempotency_key(ctx),
         )
         await ctx.reply(format_transaction_added(tx))
 
@@ -224,8 +278,13 @@ class FinanceCommandHandler(BaseCommandHandler):
             amount=amount,
             description=description,
             account_id=account_id,
+            idempotency_key=_command_idempotency_key(ctx),
         )
-        await ctx.reply(format_transaction_added(tx))
+        reply = format_transaction_added(tx)
+        alert = await self._svc.get_budget_alert(owner_jid, tx)
+        if alert:
+            reply = f"{reply}\n\n{format_budget_alert(alert)}"
+        await ctx.reply(reply)
 
     async def _handle_transfer(
         self, ctx: CommandContext, owner_jid: str, rest: list[str]
@@ -266,6 +325,7 @@ class FinanceCommandHandler(BaseCommandHandler):
             amount=amount,
             from_account_id=from_acc.id,
             to_account_id=to_acc.id,
+            idempotency_key=_command_idempotency_key(ctx),
         )
         await ctx.reply(format_transaction_added(tx))
 
@@ -280,6 +340,18 @@ class FinanceCommandHandler(BaseCommandHandler):
                 pass
         transactions = await self._svc.get_recent_transactions(owner_jid, limit=limit)
         await ctx.reply(format_transactions_list(transactions))
+
+    async def _handle_audit(
+        self, ctx: CommandContext, owner_jid: str, rest: list[str]
+    ) -> None:
+        limit = 15
+        if rest:
+            try:
+                limit = max(1, min(int(rest[0]), 30))
+            except ValueError:
+                pass
+        entries = await self._svc.get_audit_log(owner_jid, limit=limit)
+        await ctx.reply(format_audit_log(entries))
 
     async def _handle_report(
         self, ctx: CommandContext, owner_jid: str, rest: list[str]
@@ -457,29 +529,69 @@ class FinanceCommandHandler(BaseCommandHandler):
             "Kategori default akan dibuat otomatis saat pertama kali digunakan."
         )
 
-    async def _handle_categories(self, ctx: CommandContext, owner_jid: str) -> None:
-        await self._svc.ensure_defaults(owner_jid)
-        categories = await self._svc._repo.get_categories(owner_jid)
+    async def _handle_categories(
+        self, ctx: CommandContext, owner_jid: str, rest: list[str] | None = None
+    ) -> None:
+        rest = rest or []
+        action = rest[0].lower() if rest else ""
 
+        if action in ("tambah", "baru", "buat", "add", "new"):
+            args = rest[1:]
+            category_type = "expense"
+            if args and args[0].lower() in _CATEGORY_TYPE_WORDS:
+                category_type = _CATEGORY_TYPE_WORDS[args[0].lower()]
+                args = args[1:]
+            if not args:
+                await ctx.reply(
+                    "Format: `!finance kategori tambah [keluar|masuk] <nama>`\n"
+                    "Contoh: `!finance kategori tambah keluar Kopi`"
+                )
+                return
+            cat = await self._svc.create_category(owner_jid, " ".join(args), category_type)
+            label = "pengeluaran" if cat.category_type.value == "expense" else "pemasukan"
+            await ctx.reply(
+                f"Kategori {label} *{cat.icon or ''} {cat.name}* berhasil dibuat.\n"
+                f"Atur budget-nya: `!finance budget {cat.name} <nominal>`"
+                if label == "pengeluaran"
+                else f"Kategori {label} *{cat.icon or ''} {cat.name}* berhasil dibuat."
+            )
+            return
+
+        if action in ("hapus", "delete", "remove"):
+            args = rest[1:]
+            category_type = None
+            if args and args[0].lower() in _CATEGORY_TYPE_WORDS:
+                category_type = _CATEGORY_TYPE_WORDS[args[0].lower()]
+                args = args[1:]
+            if not args:
+                await ctx.reply("Format: `!finance kategori hapus <nama>`")
+                return
+            cat = await self._svc.delete_category(owner_jid, " ".join(args), category_type)
+            await ctx.reply(f"Kategori *{cat.name}* berhasil dihapus.")
+            return
+
+        categories = await self._svc.get_categories(owner_jid)
         expense_cats = [c for c in categories if c.category_type.value == "expense"]
         income_cats = [c for c in categories if c.category_type.value == "income"]
 
+        def _line(c) -> str:
+            return f"  • {c.name}" + ("" if c.is_default else " _(buatan sendiri)_")
+
         lines = ["*Kategori Keuangan*", "━━━━━━━━━━━━━━━━━━"]
         lines.append("*Pengeluaran:*")
-        for cat in expense_cats:
-            lines.append(f"  • {cat.name}")
+        lines.extend(_line(c) for c in expense_cats)
         lines.append("")
         lines.append("*Pemasukan:*")
-        for cat in income_cats:
-            lines.append(f"  • {cat.name}")
+        lines.extend(_line(c) for c in income_cats)
+        lines.append("")
+        lines.append("_Tambah kategori: `!finance kategori tambah keluar <nama>`_")
 
         await ctx.reply("\n".join(lines))
 
     async def _handle_budget(
         self, ctx: CommandContext, owner_jid: str, rest: list[str]
     ) -> None:
-        from datetime import UTC, datetime
-        now = datetime.now(UTC)
+        now = now_local()
 
         # 1. List budgets: "!finance budget" or "!finance budget list" or "!finance budget semua"
         if not rest or rest[0].lower() in ("list", "daftar", "semua"):
@@ -494,7 +606,8 @@ class FinanceCommandHandler(BaseCommandHandler):
                 return
             category_name = " ".join(rest[1:])
             await self._svc.delete_budget(owner_jid, category_name)
-            await ctx.reply(f"Budget untuk kategori *{category_name}* bulan ini berhasil dihapus.")
+            await ctx.reply(f"Budget untuk kategori *{category_name}* berhasil dihapus "
+                "dan tidak akan diulang lagi bulan depan.")
             return
 
         # 3. Check if an amount is present -> Create / Update budget

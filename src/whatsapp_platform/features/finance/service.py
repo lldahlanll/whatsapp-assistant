@@ -2,22 +2,32 @@
 
 from __future__ import annotations
 
+import re
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import TYPE_CHECKING
 
 import structlog
 
 from whatsapp_platform.domain.entities.finance import (
     AccountType,
+    BudgetAlert,
     BudgetProgress,
+    CategoryType,
     FinanceAccount,
+    FinanceAuditEntry,
     FinanceBudget,
     FinanceCategory,
     FinanceTransaction,
     MonthlySummary,
     TransactionType,
+)
+from whatsapp_platform.domain.exceptions import (
+    FinanceBalanceConflictError,
+    FinanceTransactionConflictError,
 )
 from whatsapp_platform.features.finance.default_categories import (
     ALL_DEFAULT_CATEGORIES,
@@ -27,6 +37,7 @@ from whatsapp_platform.features.finance.default_categories import (
 from whatsapp_platform.features.finance.parser import (
     guess_category_from_text,
 )
+from whatsapp_platform.shared.utils.timezone import month_bounds_utc, now_local, to_local
 
 if TYPE_CHECKING:
     from whatsapp_platform.domain.repositories.finance_repository import IFinanceRepository
@@ -66,13 +77,89 @@ class CategoryNotFoundError(FinanceServiceError):
     pass
 
 
+class CategoryAlreadyExistsError(FinanceServiceError):
+    pass
+
+
+class CategoryInUseError(FinanceServiceError):
+    pass
+
+
 class BudgetNotFoundError(FinanceServiceError):
     pass
 
 
+class ReversalTransactionError(FinanceServiceError):
+    """Baris pembatalan (reversal) tidak boleh di-reverse, diubah, atau dihapus."""
+
+    def __init__(self, tx: FinanceTransaction) -> None:
+        super().__init__(
+            f"Transaksi '{tx.human_tx_id or tx.id}' adalah pembatalan dari transaksi lain "
+            "dan tidak bisa diubah, dihapus, atau dibatalkan lagi."
+        )
+
+
+
+# Saldo disimpan sebagai REAL di SQLite (presisi ~15 digit). Batasi nominal & pembulatan agar tetap eksak.
+MAX_AMOUNT = Decimal("1000000000000")  # 1 triliun
+_CENTS = Decimal("0.01")
+
+# Kategori buatan user: batas jumlah per user dan panjang nama.
+MAX_CUSTOM_CATEGORIES = 50
+CATEGORY_NAME_MAX_LEN = 40
+DEFAULT_CUSTOM_CATEGORY_ICON = "🏷️"
+
+
+def _parse_category_type(value: str | CategoryType | None) -> CategoryType | None:
+    """'pengeluaran'/'expense'/'keluar' -> EXPENSE, 'pemasukan'/'income'/'masuk' -> INCOME."""
+    if value is None or isinstance(value, CategoryType):
+        return value
+    v = str(value).strip().lower()
+    if v in ("expense", "pengeluaran", "keluar", "out", "spending"):
+        return CategoryType.EXPENSE
+    if v in ("income", "pemasukan", "masuk", "in", "pendapatan"):
+        return CategoryType.INCOME
+    if not v:
+        return None
+    raise FinanceServiceError(
+        f"Tipe kategori '{value}' tidak valid. Gunakan 'pengeluaran' atau 'pemasukan'."
+    )
+
+
+# Persentase pemakaian budget yang memicu peringatan saat pertama kali terlewati.
+BUDGET_ALERT_THRESHOLDS: tuple[int, ...] = (80, 100)
+
+
+def _normalize_amount(amount: Decimal, too_small_message: str) -> Decimal:
+    """Bulatkan ke 2 desimal; tolak nominal <= 0, bukan angka, atau di atas batas."""
+    try:
+        if not amount.is_finite():
+            raise InvalidAmountError("Jumlah tidak valid.")
+        normalized = amount.quantize(_CENTS, rounding=ROUND_HALF_UP)
+    except (ArithmeticError, AttributeError) as exc:
+        raise InvalidAmountError("Jumlah tidak valid.") from exc
+    if normalized <= 0:
+        raise InvalidAmountError(too_small_message)
+    if normalized > MAX_AMOUNT:
+        raise InvalidAmountError("Jumlah terlalu besar (maksimal Rp 1.000.000.000.000).")
+    return normalized
+
+
+@contextmanager
+def _translate_conflicts() -> Iterator[None]:
+    """Ubah konflik dari repository (cek atomik di DB) menjadi error yang ramah user."""
+    try:
+        yield
+    except FinanceBalanceConflictError as exc:
+        raise InsufficientBalanceError(
+            "Saldo rekening tidak mencukupi (saldo berubah saat diproses). Cek saldo lalu coba lagi."
+        ) from exc
+    except FinanceTransactionConflictError as exc:
+        raise TransactionAlreadyReversedError("Transaksi sudah pernah di-reverse.") from exc
+
 
 def _generate_human_tx_id() -> str:
-    now = datetime.now(UTC)
+    now = now_local()
     return f"TXN-{now.strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
 
 
@@ -185,16 +272,34 @@ class FinanceService:
     async def find_account_by_name(
         self, owner_jid: str, name: str
     ) -> FinanceAccount | None:
+        """Cari rekening aktif berdasarkan nama.
+
+        Urutan: nama persis (tanpa beda huruf besar/kecil), lalu kecocokan kata utuh
+        ("tabungan" → "BCA Tabungan", "rekening BCA" → "BCA"). Jika lebih dari satu
+        rekening cocok, minta user memilih alih-alih menebak.
+        """
         accounts = await self.get_accounts(owner_jid)
-        name_lower = name.lower()
-        for acc in accounts:
-            if (
-                acc.name.lower() == name_lower
-                or name_lower in acc.name.lower()
-                or acc.name.lower() in name_lower
-            ):
-                return acc
-        return None
+        name_lower = name.strip().lower()
+        if not name_lower:
+            return None
+
+        exact = [a for a in accounts if a.name.lower() == name_lower]
+        if exact:
+            return exact[0]
+
+        def word_match(needle: str, haystack: str) -> bool:
+            return re.search(rf"(?<!\w){re.escape(needle)}(?!\w)", haystack) is not None
+
+        matches = [
+            a for a in accounts
+            if word_match(name_lower, a.name.lower()) or word_match(a.name.lower(), name_lower)
+        ]
+        if len(matches) > 1:
+            names = ", ".join(f"'{a.name}'" for a in matches)
+            raise AccountRequiredError(
+                f"Ada beberapa rekening yang cocok dengan '{name}': {names}. Sebutkan nama lengkapnya."
+            )
+        return matches[0] if matches else None
 
     async def delete_account(
         self, owner_jid: str, name_or_id: str
@@ -216,27 +321,132 @@ class FinanceService:
 
     # ── Categories ────────────────────────────────────────────────────────────
 
+    async def _categories_of_type(
+        self, owner_jid: str, category_type: CategoryType
+    ) -> list[FinanceCategory]:
+        await self.ensure_defaults(owner_jid)
+        return [c for c in await self._repo.get_categories(owner_jid) if c.category_type == category_type]
+
+    async def create_category(
+        self,
+        owner_jid: str,
+        name: str,
+        category_type: str | CategoryType,
+        icon: str | None = None,
+    ) -> FinanceCategory:
+        """Buat kategori pemasukan/pengeluaran baru milik user."""
+        ctype = _parse_category_type(category_type)
+        if ctype is None:
+            raise FinanceServiceError("Sebutkan tipe kategori: 'pengeluaran' atau 'pemasukan'.")
+        clean = " ".join((name or "").split())
+        if len(clean) < 2:
+            raise FinanceServiceError("Nama kategori minimal 2 karakter.")
+        if len(clean) > CATEGORY_NAME_MAX_LEN:
+            raise FinanceServiceError(f"Nama kategori maksimal {CATEGORY_NAME_MAX_LEN} karakter.")
+
+        await self.ensure_defaults(owner_jid)
+        all_categories = await self._repo.get_categories(owner_jid)
+        for c in all_categories:
+            if c.category_type == ctype and c.name.lower() == clean.lower():
+                raise CategoryAlreadyExistsError(f"Kategori '{c.name}' sudah ada.")
+        if sum(1 for c in all_categories if not c.is_default) >= MAX_CUSTOM_CATEGORIES:
+            raise FinanceServiceError(
+                f"Batas {MAX_CUSTOM_CATEGORIES} kategori buatan sendiri sudah tercapai. "
+                "Hapus kategori yang tidak dipakai dulu."
+            )
+
+        icon_clean = (icon or "").strip()
+        category = await self._repo.create_category(
+            FinanceCategory(
+                id=str(uuid.uuid4()),
+                owner_jid=owner_jid,
+                name=clean,
+                category_type=ctype,
+                icon=icon_clean if 0 < len(icon_clean) <= 8 else DEFAULT_CUSTOM_CATEGORY_ICON,
+                is_default=False,
+                created_at=datetime.now(UTC),
+            )
+        )
+        logger.info("Category created", owner=owner_jid, name=clean, type=ctype.value)
+        return category
+
+    async def delete_category(
+        self,
+        owner_jid: str,
+        name: str,
+        category_type: str | CategoryType | None = None,
+    ) -> FinanceCategory:
+        """Hapus kategori buatan user. Kategori default & yang masih dipakai tidak bisa dihapus."""
+        ctype = _parse_category_type(category_type)
+        await self.ensure_defaults(owner_jid)
+        name_clean = " ".join((name or "").split()).lower()
+        matches = [
+            c for c in await self._repo.get_categories(owner_jid)
+            if c.name.lower() == name_clean and (ctype is None or c.category_type == ctype)
+        ]
+        if not matches:
+            raise CategoryNotFoundError(f"Kategori '{name}' tidak ditemukan.")
+        if len(matches) > 1:
+            raise FinanceServiceError(
+                f"Ada kategori '{matches[0].name}' untuk pemasukan dan pengeluaran. "
+                "Sebutkan tipenya (pemasukan/pengeluaran)."
+            )
+        category = matches[0]
+        if category.is_default:
+            raise FinanceServiceError(f"Kategori default '{category.name}' tidak bisa dihapus.")
+
+        usage = await self._repo.count_category_usage(owner_jid, category.id)
+        if usage["transactions"] or usage["budgets"]:
+            parts = []
+            if usage["transactions"]:
+                parts.append(f"{usage['transactions']} transaksi")
+            if usage["budgets"]:
+                parts.append(f"{usage['budgets']} budget")
+            raise CategoryInUseError(
+                f"Kategori '{category.name}' masih dipakai oleh {' dan '.join(parts)}, "
+                "jadi tidak bisa dihapus. Hapus/ubah dulu data tersebut."
+            )
+
+        await self._repo.delete_category(owner_jid, category.id)
+        logger.info("Category deleted", owner=owner_jid, name=category.name)
+        return category
+
     async def _resolve_category(
         self, owner_jid: str, category_name: str | None, tx_type: TransactionType
     ) -> FinanceCategory | None:
-        await self.ensure_defaults(owner_jid)
-
-        if category_name:
-            cat = await self._repo.find_category_by_name(owner_jid, category_name)
-            if cat:
-                return cat
-
+        if not category_name:
+            return None
+        ctype = CategoryType.EXPENSE if tx_type == TransactionType.EXPENSE else CategoryType.INCOME
+        name_clean = " ".join(category_name.split()).lower()
+        for c in await self._categories_of_type(owner_jid, ctype):
+            if c.name.lower() == name_clean:
+                return c
         return None
 
     async def _auto_category(
         self, owner_jid: str, text: str, tx_type: TransactionType
     ) -> FinanceCategory | None:
+        if not text:
+            return None
+        ctype = CategoryType.EXPENSE if tx_type == TransactionType.EXPENSE else CategoryType.INCOME
+        categories = await self._categories_of_type(owner_jid, ctype)
+        text_lower = text.lower()
+
+        # Kategori buatan user lebih spesifik dari keyword bawaan ("kopi" -> "Kopi", bukan "Makanan").
+        # Nama terpanjang dulu agar "Kopi Susu" menang atas "Kopi".
+        custom = sorted((c for c in categories if not c.is_default), key=lambda c: -len(c.name))
+        for c in custom:
+            if re.search(rf"(?<!\w){re.escape(c.name.lower())}(?!\w)", text_lower):
+                return c
+
         keyword_map = (
             EXPENSE_KEYWORD_MAP if tx_type == TransactionType.EXPENSE else INCOME_KEYWORD_MAP
         )
         guessed_name = guess_category_from_text(text, keyword_map)
         if guessed_name:
-            return await self._repo.find_category_by_name(owner_jid, guessed_name)
+            for c in categories:
+                if c.name.lower() == guessed_name.lower():
+                    return c
         return None
 
     # ── Income ────────────────────────────────────────────────────────────────
@@ -251,8 +461,7 @@ class FinanceService:
         date: datetime | None = None,
         idempotency_key: str | None = None,
     ) -> FinanceTransaction:
-        if amount <= 0:
-            raise InvalidAmountError("Jumlah pemasukan harus lebih dari 0.")
+        amount = _normalize_amount(amount, "Jumlah pemasukan harus lebih dari 0.")
 
         if idempotency_key:
             existing = await self._repo.get_transaction_by_idempotency_key(owner_jid, idempotency_key)
@@ -286,8 +495,8 @@ class FinanceService:
             category_icon=category.icon if category else None,
         )
 
-        new_balance = account.balance + amount
-        saved_tx = await self._repo.save_transaction_atomic(tx, {account.id: new_balance})
+        with _translate_conflicts():
+            saved_tx = await self._repo.save_transaction_atomic(tx, {account.id: amount})
         if saved_tx.account_name is None:
             saved_tx.account_name = account.name
         if saved_tx.category_name is None and category:
@@ -308,8 +517,7 @@ class FinanceService:
         date: datetime | None = None,
         idempotency_key: str | None = None,
     ) -> FinanceTransaction:
-        if amount <= 0:
-            raise InvalidAmountError("Jumlah pengeluaran harus lebih dari 0.")
+        amount = _normalize_amount(amount, "Jumlah pengeluaran harus lebih dari 0.")
 
         if idempotency_key:
             existing = await self._repo.get_transaction_by_idempotency_key(owner_jid, idempotency_key)
@@ -350,8 +558,8 @@ class FinanceService:
             category_icon=category.icon if category else None,
         )
 
-        new_balance = account.balance - amount
-        saved_tx = await self._repo.save_transaction_atomic(tx, {account.id: new_balance})
+        with _translate_conflicts():
+            saved_tx = await self._repo.save_transaction_atomic(tx, {account.id: -amount})
         if saved_tx.account_name is None:
             saved_tx.account_name = account.name
         if saved_tx.category_name is None and category:
@@ -372,8 +580,7 @@ class FinanceService:
         date: datetime | None = None,
         idempotency_key: str | None = None,
     ) -> FinanceTransaction:
-        if amount <= 0:
-            raise InvalidAmountError("Jumlah transfer harus lebih dari 0.")
+        amount = _normalize_amount(amount, "Jumlah transfer harus lebih dari 0.")
 
         if idempotency_key:
             existing = await self._repo.get_transaction_by_idempotency_key(owner_jid, idempotency_key)
@@ -416,11 +623,9 @@ class FinanceService:
             transfer_to_account_name=to_acc.name,
         )
 
-        balance_updates = {
-            from_acc.id: from_acc.balance - amount,
-            to_acc.id: to_acc.balance + amount,
-        }
-        saved_tx = await self._repo.save_transaction_atomic(tx, balance_updates)
+        balance_deltas = {from_acc.id: -amount, to_acc.id: amount}
+        with _translate_conflicts():
+            saved_tx = await self._repo.save_transaction_atomic(tx, balance_deltas)
         if saved_tx.account_name is None:
             saved_tx.account_name = from_acc.name
         if saved_tx.transfer_to_account_name is None:
@@ -448,20 +653,22 @@ class FinanceService:
             raise TransactionNotFoundError(f"Transaksi '{tx_id_or_human_id}' tidak ditemukan.")
         if orig_tx.is_reversed:
             raise TransactionAlreadyReversedError(f"Transaksi '{tx_id_or_human_id}' sudah pernah di-reverse.")
+        if orig_tx.reversal_of_id:
+            raise ReversalTransactionError(orig_tx)
 
         from_acc = await self._repo.get_account_by_id(orig_tx.account_id, owner_jid)
         if not from_acc:
             raise AccountNotFoundError("Rekening transaksi tidak ditemukan.")
 
-        balance_updates: dict[str, Decimal] = {}
+        balance_deltas: dict[str, Decimal] = {}
         if orig_tx.transaction_type == TransactionType.INCOME:
             if from_acc.balance < orig_tx.amount:
                 raise InsufficientBalanceError(
                     f"Saldo {from_acc.name} ({from_acc.balance:,.0f}) tidak mencukupi untuk reversal pemasukan."
                 )
-            balance_updates[from_acc.id] = from_acc.balance - orig_tx.amount
+            balance_deltas[from_acc.id] = -orig_tx.amount
         elif orig_tx.transaction_type == TransactionType.EXPENSE:
-            balance_updates[from_acc.id] = from_acc.balance + orig_tx.amount
+            balance_deltas[from_acc.id] = orig_tx.amount
         elif orig_tx.transaction_type == TransactionType.TRANSFER:
             if not orig_tx.transfer_to_account_id:
                 raise FinanceServiceError("Transaksi transfer tidak memiliki rekening tujuan.")
@@ -472,8 +679,8 @@ class FinanceService:
                 raise InsufficientBalanceError(
                     f"Saldo {to_acc.name} ({to_acc.balance:,.0f}) tidak mencukupi untuk membatalkan transfer."
                 )
-            balance_updates[from_acc.id] = from_acc.balance + orig_tx.amount
-            balance_updates[to_acc.id] = to_acc.balance - orig_tx.amount
+            balance_deltas[from_acc.id] = orig_tx.amount
+            balance_deltas[to_acc.id] = -orig_tx.amount
 
         rev_tx = FinanceTransaction(
             id=str(uuid.uuid4()),
@@ -492,12 +699,13 @@ class FinanceService:
             created_at=datetime.now(UTC),
         )
 
-        saved_rev = await self._repo.reverse_transaction_atomic(
-            original_tx_id=orig_tx.id,
-            owner_jid=owner_jid,
-            reversal_tx=rev_tx,
-            balance_updates=balance_updates,
-        )
+        with _translate_conflicts():
+            saved_rev = await self._repo.reverse_transaction_atomic(
+                original_tx_id=orig_tx.id,
+                owner_jid=owner_jid,
+                reversal_tx=rev_tx,
+                balance_deltas=balance_deltas,
+            )
         logger.info("Transaction reversed atomically", owner=owner_jid, orig_id=orig_tx.id)
         return saved_rev
 
@@ -511,8 +719,7 @@ class FinanceService:
         new_account_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> FinanceTransaction:
-        if new_amount <= 0:
-            raise InvalidAmountError("Jumlah transaksi harus lebih dari 0.")
+        new_amount = _normalize_amount(new_amount, "Jumlah transaksi harus lebih dari 0.")
 
         orig_tx = await self._repo.get_transaction_by_id(original_tx_id, owner_jid)
         if not orig_tx:
@@ -521,6 +728,8 @@ class FinanceService:
             raise TransactionAlreadyReversedError(
                 f"Transaksi '{orig_tx.human_tx_id or orig_tx.id}' sudah di-reverse dan tidak dapat diubah."
             )
+        if orig_tx.reversal_of_id:
+            raise ReversalTransactionError(orig_tx)
 
         # 1. Resolve Account
         target_account_id = new_account_id or orig_tx.account_id
@@ -554,7 +763,9 @@ class FinanceService:
                 target_category_name = cat.name
                 target_category_icon = cat.icon
 
-        # 3. Calculate Balance Updates
+        # 3. Validate against current balances (early, friendly errors). The repository
+        #    re-checks atomically; balance_updates here are absolute targets that we
+        #    convert to deltas below.
         balance_updates: dict[str, Decimal] = {}
         old_amount = orig_tx.amount
 
@@ -661,10 +872,17 @@ class FinanceService:
             transfer_to_account_name=orig_tx.transfer_to_account_name,
         )
 
-        saved = await self._repo.update_transaction_atomic(
-            transaction=updated_tx,
-            balance_updates=balance_updates,
-        )
+        current_balances = {orig_acc.id: orig_acc.balance, target_acc.id: target_acc.balance}
+        if orig_tx.transaction_type == TransactionType.TRANSFER:
+            current_balances[to_acc.id] = to_acc.balance
+        balance_deltas = {
+            acc_id: target - current_balances[acc_id] for acc_id, target in balance_updates.items()
+        }
+        with _translate_conflicts():
+            saved = await self._repo.update_transaction_atomic(
+                transaction=updated_tx,
+                balance_deltas=balance_deltas,
+            )
         logger.info(
             "Transaction updated atomically",
             owner=owner_jid,
@@ -682,7 +900,7 @@ class FinanceService:
     async def get_monthly_report(
         self, owner_jid: str, year: int | None = None, month: int | None = None
     ) -> MonthlySummary:
-        now = datetime.now(UTC)
+        now = now_local()
         return await self._repo.get_monthly_summary(
             owner_jid,
             year=year or now.year,
@@ -740,24 +958,18 @@ class FinanceService:
             raise TransactionAlreadyReversedError(
                 f"Transaksi '{tx_id_or_human_id}' sudah di-reverse dan tidak dapat dihapus."
             )
+        if tx.reversal_of_id:
+            raise ReversalTransactionError(tx)
         success = await self._repo.delete_transaction(tx.id, owner_jid)
         if success:
-            logger.info("Transaction hard-deleted", owner=owner_jid, tx_id=tx.id)
+            logger.info("Transaction soft-deleted", owner=owner_jid, tx_id=tx.id)
         return success
 
     async def get_expense_summary(
         self, owner_jid: str, year: int | None = None, month: int | None = None
     ) -> list:
-        from datetime import datetime as dt
-
-        now = dt.now(UTC)
-        y = year or now.year
-        m = month or now.month
-        start = datetime(y, m, 1, tzinfo=UTC)
-        if m == 12:
-            end = datetime(y + 1, 1, 1, tzinfo=UTC)
-        else:
-            end = datetime(y, m + 1, 1, tzinfo=UTC)
+        now = now_local()
+        start, end = month_bounds_utc(year or now.year, month or now.month)
 
         return await self._repo.get_category_summary(owner_jid, start, end)
 
@@ -766,9 +978,9 @@ class FinanceService:
     async def resolve_expense_category(
         self, owner_jid: str, category_name: str
     ) -> FinanceCategory:
-        await self.ensure_defaults(owner_jid)
-        categories = await self._repo.get_categories(owner_jid)
-        name_clean = category_name.strip().lower()
+        # Budget hanya untuk kategori pengeluaran; jangan sampai "budget gaji" cocok ke kategori pemasukan.
+        categories = await self._categories_of_type(owner_jid, CategoryType.EXPENSE)
+        name_clean = " ".join(category_name.split()).lower()
 
         # 1. Exact match (case-insensitive)
         for c in categories:
@@ -787,7 +999,10 @@ class FinanceService:
                 if c.name.lower() == guessed.lower():
                     return c
 
-        raise CategoryNotFoundError(f"Kategori '{category_name}' tidak ditemukan.")
+        raise CategoryNotFoundError(
+            f"Kategori pengeluaran '{category_name}' belum ada. "
+            "Buat dulu kategorinya, lalu atur budget-nya."
+        )
 
     async def set_budget(
         self,
@@ -796,11 +1011,12 @@ class FinanceService:
         amount: Decimal,
         month: int | None = None,
         year: int | None = None,
+        recurring: bool = True,
     ) -> BudgetProgress:
         if amount <= 0:
             raise InvalidAmountError("Jumlah budget harus lebih dari 0.")
 
-        now = datetime.now(UTC)
+        now = now_local()
         m = month if month is not None else now.month
         y = year if year is not None else now.year
 
@@ -822,6 +1038,7 @@ class FinanceService:
             updated_at=datetime.now(UTC),
             category_name=category.name,
             category_icon=category.icon,
+            is_recurring=recurring,
         )
         await self._repo.upsert_budget(budget)
         progress = await self._repo.get_budget_progress(owner_jid, category.id, m, y)
@@ -843,7 +1060,7 @@ class FinanceService:
         month: int | None = None,
         year: int | None = None,
     ) -> BudgetProgress | None:
-        now = datetime.now(UTC)
+        now = now_local()
         m = month if month is not None else now.month
         y = year if year is not None else now.year
 
@@ -853,6 +1070,7 @@ class FinanceService:
             raise FinanceServiceError(f"Tahun '{y}' tidak valid.")
 
         category = await self.resolve_expense_category(owner_jid, category_name)
+        await self._carry_over_if_current(owner_jid, m, y)
         return await self._repo.get_budget_progress(owner_jid, category.id, m, y)
 
     async def list_budgets(
@@ -862,7 +1080,7 @@ class FinanceService:
         year: int | None = None,
     ) -> list[BudgetProgress]:
         await self.ensure_defaults(owner_jid)
-        now = datetime.now(UTC)
+        now = now_local()
         m = month if month is not None else now.month
         y = year if year is not None else now.year
 
@@ -871,6 +1089,7 @@ class FinanceService:
         if y < 2000 or y > 2100:
             raise FinanceServiceError(f"Tahun '{y}' tidak valid.")
 
+        await self._carry_over_if_current(owner_jid, m, y)
         return await self._repo.list_budgets_with_progress(owner_jid, m, y)
 
     async def delete_budget(
@@ -880,7 +1099,7 @@ class FinanceService:
         month: int | None = None,
         year: int | None = None,
     ) -> bool:
-        now = datetime.now(UTC)
+        now = now_local()
         m = month if month is not None else now.month
         y = year if year is not None else now.year
 
@@ -890,6 +1109,7 @@ class FinanceService:
             raise FinanceServiceError(f"Tahun '{y}' tidak valid.")
 
         category = await self.resolve_expense_category(owner_jid, category_name)
+        await self._carry_over_if_current(owner_jid, m, y)
         success = await self._repo.delete_budget(owner_jid, category.id, m, y)
         if not success:
             raise BudgetNotFoundError(
@@ -898,12 +1118,53 @@ class FinanceService:
         logger.info("Budget deleted", owner=owner_jid, category=category.name, month=m, year=y)
         return True
 
+    async def _carry_over_if_current(self, owner_jid: str, month: int, year: int) -> None:
+        """Salin budget berulang ke bulan berjalan (hanya bulan berjalan, tidak ke masa lalu/depan)."""
+        now = now_local()
+        if (year, month) == (now.year, now.month):
+            await self._repo.carry_over_recurring_budgets(owner_jid, month, year)
+
+    async def get_budget_alert(self, owner_jid: str, tx: FinanceTransaction) -> BudgetAlert | None:
+        """Peringatan bila pengeluaran ``tx`` membuat kategori BARU melewati 80% / 100% budget.
+
+        Hanya untuk pengeluaran di bulan berjalan. Tidak pernah melempar error: kegagalan
+        pengecekan budget tidak boleh menggagalkan pencatatan transaksi.
+        """
+        try:
+            if tx.transaction_type != TransactionType.EXPENSE or not tx.category_id:
+                return None
+            now = now_local()
+            local = to_local(tx.transaction_date)
+            if (local.year, local.month) != (now.year, now.month):
+                return None
+            await self._repo.carry_over_recurring_budgets(owner_jid, now.month, now.year)
+            progress = await self._repo.get_budget_progress(
+                owner_jid, tx.category_id, now.month, now.year
+            )
+            if not progress or progress.budget.amount <= 0:
+                return None
+            before = float((progress.spent - tx.amount) / progress.budget.amount * 100)
+            after = progress.percentage
+            for threshold in sorted(BUDGET_ALERT_THRESHOLDS, reverse=True):
+                if before < threshold <= after:
+                    return BudgetAlert(progress=progress, threshold=threshold)
+            return None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Budget alert check failed", owner=owner_jid, error=str(exc))
+            return None
+
     # ── Reset ──────────────────────────────────────────────────────────────────
+
+    async def get_audit_log(
+        self, owner_jid: str, limit: int = 15, entity_type: str | None = None
+    ) -> list[FinanceAuditEntry]:
+        """Riwayat data finance yang dihapus (terbaru dulu)."""
+        return await self._repo.get_audit_log(owner_jid, limit=limit, entity_type=entity_type)
 
     async def get_reset_preview(self, owner_jid: str) -> dict[str, int]:
         """Return hitungan data finance yang akan dihapus tanpa menghapusnya."""
         accounts = await self._repo.get_accounts(owner_jid)
-        now = datetime.now(UTC)
+        now = now_local()
         transactions = await self._repo.get_transactions(owner_jid, limit=9999)
         budgets = await self._repo.get_budgets(owner_jid, now.month, now.year)
         categories = await self._repo.get_categories(owner_jid)

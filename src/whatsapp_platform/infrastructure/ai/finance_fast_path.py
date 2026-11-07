@@ -22,6 +22,8 @@ GROUP_PRIVATE_TOOLS: set[str] = {
     "finance_delete_account",
     "finance_get_accounts",
     "finance_get_categories",
+    "finance_create_category",
+    "finance_delete_category",
     "finance_get_transaction_detail",
     "finance_update_transaction",
     "finance_delete_transaction",
@@ -92,6 +94,9 @@ def _fast_add_expense(data: dict) -> str | None:
     balance_str = f"\n• Saldo Terkini: {_fmt_rp(new_balance)}" if new_balance is not None else ""
     date_line = f"• Tanggal: {date}\n" if date else ""
 
+    alert = data.get("budget_alert")
+    alert_str = f"\n\n{alert}" if alert else ""
+
     return (
         f"*Pengeluaran Dicatat*\n\n"
         f"• Jumlah: {_fmt_rp(amount)}\n"
@@ -100,6 +105,7 @@ def _fast_add_expense(data: dict) -> str | None:
         f"• Rekening: {account}\n"
         f"• Catatan: {desc}"
         f"{balance_str}"
+        f"{alert_str}"
     )
 
 
@@ -459,6 +465,17 @@ def _fast_update_transaction(data: dict) -> str | None:
 @_handler("finance_delete_transaction")
 def _fast_delete_transaction(data: dict) -> str | None:
     status = str(data.get("status", "")).lower()
+    if status == "need_confirmation":
+        lines = ["*Konfirmasi Hapus Transaksi*\n"]
+        if data.get("transaction_id"):
+            lines.append(f"ID: `{data['transaction_id']}`")
+        if data.get("description"):
+            lines.append(f"Catatan: {data['description']}")
+        lines.append(f"Nominal: {_fmt_rp(data.get('amount', 0))}")
+        if data.get("account"):
+            lines.append(f"Rekening: {data['account']}")
+        lines.append("\nSaldo rekening akan dikembalikan. Yakin ingin menghapusnya?")
+        return "\n".join(lines)
     if status != "success":
         error_msg = data.get("message", "")
         error_code = data.get("error_code", "")
@@ -474,6 +491,19 @@ def _fast_delete_transaction(data: dict) -> str | None:
     tx_id = data.get("deleted_transaction_id", "")
     msg = data.get("message", f"Transaksi {tx_id} berhasil dihapus.")
     return msg
+
+
+# finance_create_category sengaja TANPA fast-path: setelah kategori dibuat, LLM sering perlu
+# lanjut di giliran yang sama (mis. "buat kategori Kopi lalu budget 200rb").
+
+
+@_handler("finance_delete_category")
+def _fast_delete_category(data: dict) -> str | None:
+    status = str(data.get("status", "")).lower()
+    if status != "success":
+        msg = data.get("message")
+        return f"❌ *Gagal menghapus kategori*\n\n{msg}" if msg else None
+    return f"Kategori *{data.get('category', '')}* berhasil dihapus."
 
 
 @_handler("finance_delete_budget")

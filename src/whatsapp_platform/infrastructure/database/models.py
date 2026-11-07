@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, DateTime, Index, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Index, Integer, Numeric, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from whatsapp_platform.infrastructure.database.base import Base
@@ -86,6 +86,10 @@ class FinanceCategoryModel(Base):
     """Kategori pemasukan / pengeluaran."""
 
     __tablename__ = "finance_categories"
+    # Satu nama kategori per tipe per user; mencegah duplikat saat seed default berjalan bersamaan.
+    __table_args__ = (
+        Index("uq_finance_categories_owner_type_name", "owner_jid", "category_type", "name", unique=True),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     owner_jid: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
@@ -101,7 +105,17 @@ class FinanceTransactionModel(Base):
 
     __tablename__ = "finance_transactions"
     # Nama index mengikuti migrasi a1b2c3d4e5f6 agar `alembic check` tidak melihat perbedaan.
-    __table_args__ = (Index("ix_finance_transactions_date", "transaction_date"),)
+    __table_args__ = (
+        Index("ix_finance_transactions_date", "transaction_date"),
+        # Anti-dobel atomik: satu idempotency_key hanya boleh sekali per user.
+        Index(
+            "uq_finance_transactions_owner_idem",
+            "owner_jid",
+            "idempotency_key",
+            unique=True,
+            sqlite_where=text("idempotency_key IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     human_tx_id: Mapped[str | None] = mapped_column(String(30), nullable=True, index=True)
@@ -118,6 +132,8 @@ class FinanceTransactionModel(Base):
     transfer_to_account_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     is_reversed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     reversal_of_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # Soft delete: baris tetap ada sebagai jejak audit (is_reversed=True juga di-set agar laporan mengabaikannya).
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
 
 
@@ -139,7 +155,56 @@ class FinanceBudgetModel(Base):
     amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
     month: Mapped[int] = mapped_column(Integer, nullable=False)
     year: Mapped[int] = mapped_column(Integer, nullable=False)
+    is_recurring: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("1")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
     )
+
+
+class FinanceAuditLogModel(Base):
+    """Jejak audit penghapusan data finance (snapshot baris sebelum dihapus)."""
+
+    __tablename__ = "finance_audit_log"
+    __table_args__ = (Index("ix_finance_audit_log_owner_created", "owner_jid", "created_at"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    owner_jid: Mapped[str] = mapped_column(String(100), nullable=False)
+    # transaction | account | budget | category
+    entity_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    entity_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # delete | reset
+    action: Mapped[str] = mapped_column(String(20), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    snapshot: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
+
+
+class ScheduledTaskModel(Base):
+    """Pengingat & laporan terjadwal yang dikirim bot secara proaktif."""
+
+    __tablename__ = "scheduled_tasks"
+    __table_args__ = (
+        Index("ix_scheduled_tasks_due", "is_active", "next_run_at"),
+        Index("ix_scheduled_tasks_owner", "owner_jid", "is_active"),
+        UniqueConstraint("owner_jid", "short_id", name="uq_scheduled_tasks_owner_short_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    owner_jid: Mapped[str] = mapped_column(String(100), nullable=False)
+    chat_jid: Mapped[str] = mapped_column(String(100), nullable=False)
+    short_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    # reminder | finance_report
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # once | daily | weekdays | weekly | monthly
+    recurrence: Mapped[str] = mapped_column(String(20), nullable=False)
+    next_run_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    anchor_day: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    run_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    fail_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))

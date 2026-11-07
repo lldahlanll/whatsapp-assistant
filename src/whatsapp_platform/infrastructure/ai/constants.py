@@ -47,9 +47,10 @@ NINEROUTER_INTENT_MODEL_MAP: dict[str, str] = {
     "network": "tools-pool",
     "full": "tools-pool",
     "image": "vision-pool",
+    "memory": "tools-pool",
 }
 
-IntentType = Literal["simple_chat", "chat", "finance", "network", "full", "image"]
+IntentType = Literal["simple_chat", "chat", "finance", "network", "full", "image", "memory"]
 
 BASE_SYSTEM_PROMPT = (
     "You are Nara, a smart, friendly, and helpful personal assistant on WhatsApp.\n"
@@ -177,6 +178,32 @@ AI_IMAGE_DOWNLOAD_FAILED_MESSAGE = (
     "Silakan kirim ulang gambarnya."
 )
 
+# Voice note / transkripsi audio
+AI_AUDIO_TOO_LONG_MESSAGE = (
+    "Maaf, voice note terlalu panjang untuk diproses (maksimal {max_seconds} detik). "
+    "Silakan kirim voice note yang lebih singkat."
+)
+
+AI_AUDIO_TOO_LARGE_MESSAGE = (
+    "Maaf, voice note terlalu besar untuk diproses (maksimal {max_mb} MB)."
+)
+
+AI_AUDIO_UNSUPPORTED_MESSAGE = (
+    "Maaf, format audio ini belum didukung. Silakan kirim sebagai voice note WhatsApp."
+)
+
+AI_AUDIO_DOWNLOAD_FAILED_MESSAGE = (
+    "Maaf, voice note gagal diunduh. Silakan kirim ulang."
+)
+
+AI_AUDIO_EMPTY_TRANSCRIPT_MESSAGE = (
+    "Maaf, suara di voice note tidak terdengar jelas. Coba kirim ulang atau ketik pesannya."
+)
+
+AI_AUDIO_TRANSCRIPTION_FAILED_MESSAGE = (
+    "Maaf, voice note belum bisa diubah menjadi teks saat ini. Silakan ketik pesannya."
+)
+
 _AMOUNT_PATTERN = re.compile(
     r"(?:rp\.?\s*\d+|\b\d+\s*(?:rb|ribu|jt|juta|k)\b)",
     re.IGNORECASE,
@@ -189,10 +216,14 @@ _FINANCE_ACTION_VERBS = {
 TRANSFER_VERB_PATTERN = re.compile(r"\b(?:tf|pindah(?:kan)?|oper)\b", re.IGNORECASE)
 _TRANSFER_SHORTCUT = re.compile(r"\btf\b", re.IGNORECASE)
 
+# Termasuk salah ketik umum ("buget", "bujet") agar tool budget tetap dipilih.
+BUDGET_TERMS: tuple[str, ...] = ("budget", "buget", "bujet", "bugdet", "anggaran")
+
 FINANCE_KEYWORDS: set[str] = {
     "bayar", "beli", "saldo", "transfer", "pengeluaran", "pemasukan", "budget",
     "catat", "catet", "dompet", "keuangan", "utang", "cicilan", "gaji",
     "tabungan", "rekap", "uang", "duit", "rupiah", "pembayaran",
+    "buget", "bujet", "bugdet",
     "nota", "struk", "transaksi", "belanja", "anggaran", "kategori", "jual", "mutasi",
     "rekening", "akun", "top up", "topup", "isi saldo", "tambah saldo", "setor", "deposit",
     "harga", "nominal", "biaya", "tarif", "ongkir", "tagihan", "riwayat", "histori", "history", "laporan",

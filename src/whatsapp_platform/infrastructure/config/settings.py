@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     app_env: Literal["development", "staging", "production"] = Field(
         default="development", description="Execution environment"
     )
-    debug: bool = Field(default=True, description="Enable debug logging")
+    debug: bool = Field(default=False, description="Enable debug logging")
 
     session_name: str = Field(
         default="default_session", description="WhatsApp Session Identifier"
@@ -38,12 +38,35 @@ class Settings(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
         default="INFO", description="Log level"
     )
+    log_file_path: str = Field(
+        default="./logs/app.log",
+        description=(
+            "File log JSON berotasi (production saja). Di Docker ./logs = volume app_logs, "
+            "jadi log tetap ada setelah container dibuat ulang. Kosongkan untuk mematikan."
+        ),
+    )
+    log_file_max_bytes: int = Field(
+        default=10 * 1024 * 1024, ge=1024 * 1024, description="Ukuran satu file log sebelum dirotasi"
+    )
+    log_file_backup_count: int = Field(
+        default=10, ge=1, le=100, description="Jumlah file log lama yang disimpan (app.log.1 ... .N)"
+    )
 
     # REST API settings
     api_enabled: bool = Field(default=True, description="Enable REST API server")
-    api_host: str = Field(default="0.0.0.0", description="API server bind host")  # noqa: S104
+    api_host: str = Field(
+        default="127.0.0.1",
+        description="API server bind host (pakai 0.0.0.0 hanya di dalam container / di belakang reverse proxy)",
+    )
     api_port: int = Field(default=8000, description="API server port")
     api_key: str = Field(default="", description="API key for X-API-Key authentication (empty = disabled)")
+    api_docs_enabled: bool = Field(
+        default=False, description="Buka /docs, /redoc dan /openapi.json (jangan aktifkan di production)"
+    )
+    api_cors_origins: list[str] | str = Field(
+        default_factory=list,
+        description="Origin yang boleh akses API dari browser (comma-separated). Kosong = CORS mati",
+    )
 
     # AI Multi-Provider settings
     gemini_api_keys: list[str] | str = Field(
@@ -84,6 +107,9 @@ class Settings(BaseSettings):
     ai_rate_limit_max_requests: int = Field(
         default=5, description="Max AI requests per minute per chat"
     )
+    ai_rate_limit_per_user_max_requests: int = Field(
+        default=3, description="Max AI requests per window per pengirim di grup (0 = nonaktif)"
+    )
     ai_rate_limit_window_seconds: float = Field(
         default=60.0, description="Per-chat rate guard window in seconds"
     )
@@ -111,6 +137,14 @@ class Settings(BaseSettings):
     ai_max_context_chars: int = Field(
         default=16000, description="Max character budget for LLM context"
     )
+    ai_default_enabled: bool = Field(
+        default=False,
+        description="Aktifkan AI otomatis untuk chat baru. Default mati; nyalakan per chat lewat !ai on",
+    )
+    ai_admin_jids: list[str] | str = Field(
+        default_factory=list,
+        description="Nomor/JID yang boleh menjalankan !ai on/off/reset/model/stats (comma-separated)",
+    )
     ai_bot_mention_name: str = Field(
         default="", description="Bot display name for group chat @mention detection"
     )
@@ -127,18 +161,39 @@ class Settings(BaseSettings):
     ai_database_path: str = Field(
         default="./storage/ai_data.db", description="Path to AI persistence SQLite database"
     )
-
-    # Customer Lookup MySQL settings
-    mysql_host: str = Field(default="", description="MySQL Host")
-    mysql_port: int = Field(default=3306, description="MySQL Port")
-    mysql_user: str = Field(default="", description="MySQL User")
-    mysql_password: str = Field(default="", description="MySQL Password")
-    mysql_db: str = Field(default="", description="MySQL Database")
-    mysql_pool_min_size: int = Field(default=1, description="MySQL Pool minimum size")
-    mysql_pool_max_size: int = Field(default=3, description="MySQL Pool maximum size")
-    mysql_query_timeout_ms: int = Field(default=3000, description="MySQL query timeout in milliseconds")
-    customer_lookup_allowed_groups: list[str] | str = Field(
-        default_factory=list, description="Allowed WhatsApp group JIDs for Customer Lookup"
+    ai_memory_enabled: bool = Field(
+        default=True,
+        description="Memori persisten per pengguna: fakta yang diminta diingat disuntikkan ke system prompt",
+    )
+    ai_memory_max_entries: int = Field(
+        default=20, description="Jumlah maksimum catatan memori per pengguna per chat"
+    )
+    ai_memory_max_chars: int = Field(
+        default=1500, description="Total karakter maksimum memori per pengguna per chat"
+    )
+    scheduler_enabled: bool = Field(
+        default=True,
+        description="Pengingat & laporan terjadwal yang dikirim bot secara proaktif",
+    )
+    scheduler_poll_seconds: float = Field(
+        default=20.0, ge=5.0, le=300.0, description="Interval (detik) pengecekan jadwal jatuh tempo"
+    )
+    ai_voice_enabled: bool = Field(
+        default=True,
+        description="Transkripsi voice note (Groq Whisper) lalu diproses seperti pesan teks",
+    )
+    ai_audio_max_bytes: int = Field(
+        default=10 * 1024 * 1024,
+        description="Ukuran maksimum voice note (byte) yang diunduh dan ditranskripsi",
+    )
+    ai_audio_max_seconds: int = Field(
+        default=180, description="Durasi maksimum voice note (detik) yang ditranskripsi"
+    )
+    ai_transcription_model: str = Field(
+        default="whisper-large-v3-turbo", description="Model transkripsi Groq Whisper"
+    )
+    ai_transcription_language: str = Field(
+        default="id", description="Kode bahasa ISO-639-1 untuk transkripsi (kosong = deteksi otomatis)"
     )
 
     # MikroTik REST API & Network AI settings
@@ -164,8 +219,9 @@ class Settings(BaseSettings):
         "groq_api_keys",
         "openrouter_api_keys",
         "ninerouter_api_keys",
-        "customer_lookup_allowed_groups",
         "network_allowed_jids",
+        "ai_admin_jids",
+        "api_cors_origins",
         mode="before",
     )
     @classmethod
@@ -177,6 +233,23 @@ class Settings(BaseSettings):
                 return []
             return [k.strip() for k in value.split(",") if k.strip()]
         return value
+
+    def mikrotik_security_warnings(self) -> list[str]:
+        """Peringatan konfigurasi MikroTik yang berisiko (kredensial router lewat jaringan)."""
+        if not (self.mikrotik_enabled and self.mikrotik_host):
+            return []
+        warnings: list[str] = []
+        if not self.mikrotik_use_ssl:
+            warnings.append(
+                "MIKROTIK_USE_SSL=false: kredensial router dikirim cleartext (HTTP Basic Auth). "
+                "Aktifkan www-ssl di RouterOS dan set MIKROTIK_USE_SSL=true."
+            )
+        elif not self.mikrotik_verify_ssl:
+            warnings.append(
+                "MIKROTIK_VERIFY_SSL=false: sertifikat router tidak diverifikasi (rentan MITM). "
+                "Pasang sertifikat valid/CA sendiri lalu set MIKROTIK_VERIFY_SSL=true."
+            )
+        return warnings
 
     @field_validator("mikrotik_enabled", mode="before")
     @classmethod

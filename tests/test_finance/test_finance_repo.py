@@ -61,7 +61,7 @@ async def test_repo_save_transaction_atomic_updates_balance(async_session_factor
         created_at=None,  # type: ignore[arg-type]
     )
 
-    saved = await repo.save_transaction_atomic(tx, {acc.id: Decimal("75000")})
+    saved = await repo.save_transaction_atomic(tx, {acc.id: Decimal("-25000")})
     assert saved.id == "tx-1"
     assert saved.human_tx_id == "TXN-20260818-000001"
 
@@ -103,7 +103,7 @@ async def test_repo_idempotency_lookup(async_session_factory) -> None:
         created_at=None,  # type: ignore[arg-type]
     )
 
-    await repo.save_transaction_atomic(tx, {acc.id: Decimal("150000")})
+    await repo.save_transaction_atomic(tx, {acc.id: Decimal("50000")})
 
     found = await repo.get_transaction_by_idempotency_key(owner_jid, "unique-msg-999")
     assert found is not None
@@ -144,7 +144,7 @@ async def test_repo_reverse_transaction_atomic(async_session_factory) -> None:
         transfer_to_account_id=None,
         created_at=None,  # type: ignore[arg-type]
     )
-    await repo.save_transaction_atomic(orig_tx, {acc.id: Decimal("400000")})
+    await repo.save_transaction_atomic(orig_tx, {acc.id: Decimal("-100000")})
 
     rev_tx = FinanceTransaction(
         id="tx-rev",
@@ -165,7 +165,7 @@ async def test_repo_reverse_transaction_atomic(async_session_factory) -> None:
         original_tx_id=orig_tx.id,
         owner_jid=owner_jid,
         reversal_tx=rev_tx,
-        balance_updates={acc.id: Decimal("500000")},
+        balance_deltas={acc.id: Decimal("100000")},
     )
 
     assert rev_saved.reversal_of_id == orig_tx.id

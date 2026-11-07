@@ -8,10 +8,17 @@ from whatsapp_platform.features.network.rate_guard import NetworkRateGuard
 from whatsapp_platform.infrastructure.config.settings import Settings
 
 
-def test_permission_checker_empty_whitelist_allows_all() -> None:
-    settings = Settings(network_allowed_jids=[])
+def test_permission_checker_empty_whitelists_deny_all() -> None:
+    settings = Settings(network_allowed_jids=[], ai_admin_jids=[])
+    checker = NetworkPermissionChecker(settings)
+    assert checker.has_network_read_permission(JID.parse("628123456789@s.whatsapp.net")) is False
+
+
+def test_permission_checker_falls_back_to_ai_admins() -> None:
+    settings = Settings(network_allowed_jids=[], ai_admin_jids="628123456789")
     checker = NetworkPermissionChecker(settings)
     assert checker.has_network_read_permission(JID.parse("628123456789@s.whatsapp.net")) is True
+    assert checker.has_network_read_permission(JID.parse("628999999999@s.whatsapp.net")) is False
 
 
 def test_permission_checker_with_whitelist() -> None:

@@ -257,7 +257,7 @@ async def test_intent_classification_routing():
     trigger_chat = _make_msg("c1", "halo cuaca hari ini gimana?")
     await use_case.execute("chat_jid", trigger_chat)
     mock_ai_service.generate_reply.assert_called_once()
-    assert mock_ai_service.generate_reply.call_args[1]["messages"][0].content == AI_SYSTEM_PROMPT
+    assert mock_ai_service.generate_reply.call_args[1]["messages"][0].content.startswith(AI_SYSTEM_PROMPT)
     mock_ai_service.generate_reply.reset_mock()
 
     # Case B: Finance -> generate_reply_with_tools (subset of FINANCE_TOOLS, AI_FINANCE_SYSTEM_PROMPT)
@@ -265,7 +265,7 @@ async def test_intent_classification_routing():
     await use_case.execute("chat_jid", trigger_fin)
     mock_ai_service.generate_reply_with_tools.assert_called_once()
     kwargs = mock_ai_service.generate_reply_with_tools.call_args[1]
-    assert kwargs["messages"][0].content == AI_FINANCE_SYSTEM_PROMPT
+    assert kwargs["messages"][0].content.startswith(AI_FINANCE_SYSTEM_PROMPT)
     assert all(t in FINANCE_TOOLS for t in kwargs["tools"])
     mock_ai_service.generate_reply_with_tools.reset_mock()
 
@@ -274,7 +274,7 @@ async def test_intent_classification_routing():
     await use_case.execute("chat_jid", trigger_net)
     mock_ai_service.generate_reply_with_tools.assert_called_once()
     kwargs = mock_ai_service.generate_reply_with_tools.call_args[1]
-    assert kwargs["messages"][0].content == AI_NETWORK_SYSTEM_PROMPT
+    assert kwargs["messages"][0].content.startswith(AI_NETWORK_SYSTEM_PROMPT)
     assert all(t in MIKROTIK_TOOLS for t in kwargs["tools"])
     mock_ai_service.generate_reply_with_tools.reset_mock()
 
@@ -283,7 +283,7 @@ async def test_intent_classification_routing():
     await use_case.execute("chat_jid", trigger_full)
     mock_ai_service.generate_reply_with_tools.assert_called_once()
     kwargs = mock_ai_service.generate_reply_with_tools.call_args[1]
-    assert kwargs["messages"][0].content == AI_FULL_SYSTEM_PROMPT
+    assert kwargs["messages"][0].content.startswith(AI_FULL_SYSTEM_PROMPT)
     assert all(t in (MIKROTIK_TOOLS + FINANCE_TOOLS) for t in kwargs["tools"])
     mock_ai_service.generate_reply_with_tools.reset_mock()
 
@@ -292,7 +292,7 @@ async def test_intent_classification_routing():
     trigger_disabled = _make_msg("d1", "ping mikrotik terus catat pengeluaran 20rb")
     await use_case.execute("chat_jid", trigger_disabled)
     mock_ai_service.generate_reply.assert_called_once()
-    assert mock_ai_service.generate_reply.call_args[1]["messages"][0].content == AI_SYSTEM_PROMPT
+    assert mock_ai_service.generate_reply.call_args[1]["messages"][0].content.startswith(AI_SYSTEM_PROMPT)
     mock_ai_service.generate_reply_with_tools.assert_not_called()
 
 

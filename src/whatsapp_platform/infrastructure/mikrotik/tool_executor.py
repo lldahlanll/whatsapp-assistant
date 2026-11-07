@@ -119,6 +119,8 @@ class MikroTikToolExecutor:
         arguments: dict[str, Any],
         user_jid: JID,
         chat_jid: JID,
+        message_id: str | None = None,  # interface parity; network tools are read-only
+        user_text: str | None = None,
     ) -> str:
         """Execute a tool call requested by LLM and return JSON string response.
 
@@ -152,10 +154,11 @@ class MikroTikToolExecutor:
         logger.info(
             "Executing MikroTik tool call from LLM",
             tool=tool_name,
-            arguments=arguments,
+            argument_names=sorted(arguments),
             user=user_jid_str,
             chat=chat_jid_str,
         )
+        logger.debug("MikroTik tool call arguments", tool=tool_name, arguments=arguments)
 
         try:
             result: dict[str, Any] | list[dict[str, Any]] = {}
@@ -211,5 +214,5 @@ class MikroTikToolExecutor:
             )
             return json.dumps({
                 "status": "error",
-                "error": f"Gagal mengeksekusi tool {tool_name}: {exc}",
+                "error": f"Gagal mengeksekusi tool {tool_name}. Router tidak dapat dihubungi atau mengembalikan error.",
             }, ensure_ascii=False)

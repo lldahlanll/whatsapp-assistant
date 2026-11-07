@@ -67,7 +67,15 @@ class MockMessagingGateway(IMessagingGateway):
             "jid": str(group_jid),
             "owner": "628111@s.whatsapp.net",
             "name": "Test Group",
-            "participants": ["628111@s.whatsapp.net", "628222@s.whatsapp.net"],
+            # Same shape as NeonizeGateway.get_group_info
+            "participants": [
+                {"jid": "628111@s.whatsapp.net", "phone": "628111", "display_name": "Owner",
+                 "is_admin": True, "is_super_admin": True},
+                {"jid": "628222@s.whatsapp.net", "phone": "628222", "display_name": "Admin",
+                 "is_admin": True, "is_super_admin": False},
+                {"jid": "190000000000333@lid", "phone": "628333", "display_name": "Member",
+                 "is_admin": False, "is_super_admin": False},
+            ],
         }
 
     async def get_group_invite_link(self, group_jid: JID, revoke: bool = False) -> str:

@@ -140,6 +140,8 @@ class FinanceBudget:
     updated_at: datetime
     category_name: str | None = field(default=None)
     category_icon: str | None = field(default=None)
+    # True = disalin otomatis ke bulan berikutnya sampai budget dihapus.
+    is_recurring: bool = field(default=True)
 
 
 @dataclass
@@ -149,3 +151,25 @@ class BudgetProgress:
     remaining: Decimal
     percentage: float
     status: str
+
+
+@dataclass
+class BudgetAlert:
+    """Peringatan saat pengeluaran baru melewati ambang budget (80% / 100%)."""
+
+    progress: BudgetProgress
+    threshold: int
+
+
+@dataclass
+class FinanceAuditEntry:
+    """Satu catatan riwayat penghapusan data finance."""
+
+    id: str
+    owner_jid: str
+    entity_type: str  # transaction | account | budget | category
+    entity_id: str | None
+    action: str  # delete | reset
+    summary: str
+    snapshot: dict
+    created_at: datetime
