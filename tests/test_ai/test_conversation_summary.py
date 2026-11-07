@@ -136,6 +136,32 @@ async def test_output_is_clipped_and_preamble_removed():
     assert text.startswith("- poin nomor 0") and len(text) <= 201 and text.endswith("…")
 
 
+async def test_long_digit_sequences_are_redacted():
+    ai = MagicMock(generate_reply=AsyncMock(return_value=_resp(
+        "- Rekening BCA 1234567890 dan HP 0812-3456-7890\n- Budget makan 1.500.000, beli 2 tiket 2026"
+    )))
+    s = _summarizer(FakeRepo([_msg(i) for i in range(11)]), ai)
+    await s.update(CHAT, None)
+    text = s.get(CHAT, None)
+    assert "1234567890" not in text and "3456" not in text and text.count("[disamarkan]") == 2
+    assert "1.500.000" in text and "2026" in text  # nominal & tahun tetap utuh
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("- Minta pengingat makan jam 10:00 WIB (sudah diset).", "- Minta pengingat makan jam 10:00 WIB."),
+        ("- Budget transport 220 rb sudah dicatat", "- Budget transport 220 rb"),
+        ("- Kategori Kopi, berhasil dibuat; lanjut bahas budget", "- Kategori Kopi; lanjut bahas budget"),
+        ("- Pengguna sudah pernah ke Bali", "- Pengguna sudah pernah ke Bali"),  # bukan klaim status
+    ],
+)
+def test_status_claims_are_stripped(raw, expected):
+    from whatsapp_platform.features.ai.conversation_summary import _redact
+
+    assert _redact(raw) == expected
+
+
 def test_clip_short_text_untouched():
     assert _clip("  pendek  ", 100) == "pendek"
 
