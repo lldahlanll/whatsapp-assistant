@@ -41,6 +41,11 @@ _GROUP_ALLOWED_SUBCOMMANDS = frozenset(
     _INCOME_SUBCOMMANDS + _EXPENSE_SUBCOMMANDS + _TRANSFER_SUBCOMMANDS
 )
 
+_CATEGORY_TYPE_WORDS: dict[str, str] = {
+    "keluar": "expense", "pengeluaran": "expense", "expense": "expense",
+    "masuk": "income", "pemasukan": "income", "income": "income",
+}
+
 _GROUP_PRIVATE_ONLY_TEXT = (
     "Data keuangan pribadi hanya bisa dilihat dan dikelola lewat chat pribadi.\n"
     "Di grup kamu hanya bisa mencatat transaksi (`masuk`, `keluar`, `transfer`)."
@@ -60,6 +65,13 @@ _HELP_TEXT = (
     "\n"
     "*Transfer:*\n"
     "  `!finance transfer 100rb BCA BRI`\n"
+    "\n"
+    "*Kategori:*\n"
+    "  `!finance kategori` — daftar kategori\n"
+    "  `!finance kategori tambah keluar Kopi` — kategori pengeluaran baru\n"
+    "  `!finance kategori tambah masuk Sewa Kos` — kategori pemasukan baru\n"
+    "  `!finance kategori hapus Kopi` — hapus kategori buatan sendiri\n"
+    "  _Setelah dibuat, kategori bisa dipakai untuk transaksi & budget._\n"
     "\n"
     "*Budget / Anggaran:*\n"
     "  `!finance budget` — lihat semua budget bulan ini\n"
@@ -156,7 +168,7 @@ class FinanceCommandHandler(BaseCommandHandler):
                 await self._handle_account(ctx, owner_jid, rest)
 
             elif sub in ("kategori", "category", "categories", "cat"):
-                await self._handle_categories(ctx, owner_jid)
+                await self._handle_categories(ctx, owner_jid, rest)
 
             elif sub in ("budget", "anggaran"):
                 await self._handle_budget(ctx, owner_jid, rest)
@@ -517,21 +529,62 @@ class FinanceCommandHandler(BaseCommandHandler):
             "Kategori default akan dibuat otomatis saat pertama kali digunakan."
         )
 
-    async def _handle_categories(self, ctx: CommandContext, owner_jid: str) -> None:
-        await self._svc.ensure_defaults(owner_jid)
-        categories = await self._svc._repo.get_categories(owner_jid)
+    async def _handle_categories(
+        self, ctx: CommandContext, owner_jid: str, rest: list[str] | None = None
+    ) -> None:
+        rest = rest or []
+        action = rest[0].lower() if rest else ""
 
+        if action in ("tambah", "baru", "buat", "add", "new"):
+            args = rest[1:]
+            category_type = "expense"
+            if args and args[0].lower() in _CATEGORY_TYPE_WORDS:
+                category_type = _CATEGORY_TYPE_WORDS[args[0].lower()]
+                args = args[1:]
+            if not args:
+                await ctx.reply(
+                    "Format: `!finance kategori tambah [keluar|masuk] <nama>`\n"
+                    "Contoh: `!finance kategori tambah keluar Kopi`"
+                )
+                return
+            cat = await self._svc.create_category(owner_jid, " ".join(args), category_type)
+            label = "pengeluaran" if cat.category_type.value == "expense" else "pemasukan"
+            await ctx.reply(
+                f"Kategori {label} *{cat.icon or ''} {cat.name}* berhasil dibuat.\n"
+                f"Atur budget-nya: `!finance budget {cat.name} <nominal>`"
+                if label == "pengeluaran"
+                else f"Kategori {label} *{cat.icon or ''} {cat.name}* berhasil dibuat."
+            )
+            return
+
+        if action in ("hapus", "delete", "remove"):
+            args = rest[1:]
+            category_type = None
+            if args and args[0].lower() in _CATEGORY_TYPE_WORDS:
+                category_type = _CATEGORY_TYPE_WORDS[args[0].lower()]
+                args = args[1:]
+            if not args:
+                await ctx.reply("Format: `!finance kategori hapus <nama>`")
+                return
+            cat = await self._svc.delete_category(owner_jid, " ".join(args), category_type)
+            await ctx.reply(f"Kategori *{cat.name}* berhasil dihapus.")
+            return
+
+        categories = await self._svc.get_categories(owner_jid)
         expense_cats = [c for c in categories if c.category_type.value == "expense"]
         income_cats = [c for c in categories if c.category_type.value == "income"]
 
+        def _line(c) -> str:
+            return f"  • {c.name}" + ("" if c.is_default else " _(buatan sendiri)_")
+
         lines = ["*Kategori Keuangan*", "━━━━━━━━━━━━━━━━━━"]
         lines.append("*Pengeluaran:*")
-        for cat in expense_cats:
-            lines.append(f"  • {cat.name}")
+        lines.extend(_line(c) for c in expense_cats)
         lines.append("")
         lines.append("*Pemasukan:*")
-        for cat in income_cats:
-            lines.append(f"  • {cat.name}")
+        lines.extend(_line(c) for c in income_cats)
+        lines.append("")
+        lines.append("_Tambah kategori: `!finance kategori tambah keluar <nama>`_")
 
         await ctx.reply("\n".join(lines))
 

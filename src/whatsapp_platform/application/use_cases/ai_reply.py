@@ -184,7 +184,7 @@ class AIReplyUseCase:
                         if prev_msg.direction == MessageDirection.OUTBOUND or prev_msg.is_from_me:
                             prev_txt = prev_msg.content.text if isinstance(prev_msg.content, TextContent) else ""
                             prev_low = prev_txt.lower()
-                            if any(k in prev_low for k in ("konfirmasi", "yakin", "rekening", "transaksi", "saldo", "budget", "anggaran", "hapus")):
+                            if any(k in prev_low for k in ("konfirmasi", "yakin", "rekening", "transaksi", "saldo", "budget", "anggaran", "kategori", "hapus")):
                                 intent = "finance"
                                 logger.info("Inherited 'finance' intent from previous confirmation prompt", chat=chat_jid_str)
                                 break

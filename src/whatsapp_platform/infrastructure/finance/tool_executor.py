@@ -18,6 +18,8 @@ from whatsapp_platform.features.finance.service import (
     AccountNotFoundError,
     AccountRequiredError,
     BudgetNotFoundError,
+    CategoryAlreadyExistsError,
+    CategoryInUseError,
     CategoryNotFoundError,
     InsufficientBalanceError,
     InvalidAmountError,
@@ -106,6 +108,8 @@ GROUP_BLOCKED_TOOLS: set[str] = {
     "finance_delete_account",
     "finance_get_accounts",
     "finance_get_categories",
+    "finance_create_category",
+    "finance_delete_category",
     "finance_get_transaction_detail",
     "finance_update_transaction",
     "finance_delete_transaction",
@@ -235,6 +239,12 @@ class FinanceToolExecutor:
             elif tool_name == "finance_get_categories":
                 result = await self._get_categories(owner_jid, arguments)
 
+            elif tool_name == "finance_create_category":
+                result = await self._create_category(owner_jid, arguments)
+
+            elif tool_name == "finance_delete_category":
+                result = await self._delete_category(owner_jid, arguments)
+
             elif tool_name == "finance_get_transaction_detail":
                 result = await self._get_transaction_detail(owner_jid, arguments)
 
@@ -325,6 +335,18 @@ class FinanceToolExecutor:
             return json.dumps({
                 "status": "error",
                 "error_code": "CATEGORY_NOT_FOUND",
+                "message": str(exc),
+            }, ensure_ascii=False)
+        except CategoryAlreadyExistsError as exc:
+            return json.dumps({
+                "status": "error",
+                "error_code": "CATEGORY_EXISTS",
+                "message": str(exc),
+            }, ensure_ascii=False)
+        except CategoryInUseError as exc:
+            return json.dumps({
+                "status": "error",
+                "error_code": "CATEGORY_IN_USE",
                 "message": str(exc),
             }, ensure_ascii=False)
         except BudgetNotFoundError as exc:
@@ -746,11 +768,40 @@ class FinanceToolExecutor:
         return json.dumps({
             "status": "success",
             "income_categories": [
-                {"name": c.name, "icon": c.icon} for c in income_cats
+                {"name": c.name, "icon": c.icon, "custom": not c.is_default} for c in income_cats
             ],
             "expense_categories": [
-                {"name": c.name, "icon": c.icon} for c in expense_cats
+                {"name": c.name, "icon": c.icon, "custom": not c.is_default} for c in expense_cats
             ],
+        }, ensure_ascii=False)
+
+    async def _create_category(self, owner_jid: str, args: dict) -> str:
+        category = await self._svc.create_category(
+            owner_jid,
+            name=str(args.get("name") or ""),
+            category_type=args.get("category_type") or "expense",
+            icon=args.get("icon"),
+        )
+        type_label = "pengeluaran" if category.category_type.value == "expense" else "pemasukan"
+        return json.dumps({
+            "status": "success",
+            "category": category.name,
+            "category_type": category.category_type.value,
+            "icon": category.icon,
+            "message": f"Kategori {type_label} '{category.name}' berhasil dibuat.",
+        }, ensure_ascii=False)
+
+    async def _delete_category(self, owner_jid: str, args: dict) -> str:
+        category = await self._svc.delete_category(
+            owner_jid,
+            name=str(args.get("name") or ""),
+            category_type=args.get("category_type"),
+        )
+        return json.dumps({
+            "status": "success",
+            "category": category.name,
+            "category_type": category.category_type.value,
+            "message": f"Kategori '{category.name}' berhasil dihapus.",
         }, ensure_ascii=False)
 
     async def _get_transaction_detail(self, owner_jid: str, args: dict) -> str:

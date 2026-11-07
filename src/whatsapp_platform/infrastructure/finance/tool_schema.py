@@ -337,6 +337,59 @@ FINANCE_TOOLS: list[ToolDefinition] = [
         ],
     ),
     ToolDefinition(
+        name="finance_create_category",
+        description=(
+            "Membuat kategori pemasukan/pengeluaran BARU milik pengguna. "
+            "Gunakan saat pengguna meminta menambah kategori, misal: 'tambah kategori pengeluaran Kopi', "
+            "'buat kategori pemasukan Sewa Kos', 'bikin kategori Skincare'. "
+            "Juga tawarkan/gunakan bila pengguna ingin budget atau transaksi untuk kategori yang belum ada "
+            "dan pengguna setuju membuatnya. Jangan membuat kategori tanpa permintaan pengguna."
+        ),
+        parameters=[
+            ToolParameter(
+                name="name",
+                type="string",
+                description="Nama kategori baru (misal: 'Kopi', 'Skincare', 'Sewa Kos').",
+                required=True,
+            ),
+            ToolParameter(
+                name="category_type",
+                type="string",
+                description="Tipe kategori: 'expense' (pengeluaran) atau 'income' (pemasukan). Default 'expense'.",
+                required=False,
+                enum=["expense", "income"],
+            ),
+            ToolParameter(
+                name="icon",
+                type="string",
+                description="Emoji ikon kategori (opsional, misal '☕').",
+                required=False,
+            ),
+        ],
+    ),
+    ToolDefinition(
+        name="finance_delete_category",
+        description=(
+            "Menghapus kategori buatan pengguna. Kategori default dan kategori yang masih dipakai "
+            "transaksi/budget tidak bisa dihapus. Contoh: 'hapus kategori Kopi'."
+        ),
+        parameters=[
+            ToolParameter(
+                name="name",
+                type="string",
+                description="Nama kategori yang akan dihapus.",
+                required=True,
+            ),
+            ToolParameter(
+                name="category_type",
+                type="string",
+                description="'expense' atau 'income'. Isi hanya jika nama yang sama ada di kedua tipe.",
+                required=False,
+                enum=["expense", "income"],
+            ),
+        ],
+    ),
+    ToolDefinition(
         name="finance_get_transaction_detail",
         description=(
             "Mencari dan mengambil detail transaksi berdasarkan kata kunci deskripsi atau tanggal. "
@@ -441,7 +494,9 @@ FINANCE_TOOLS: list[ToolDefinition] = [
         description=(
             "Membuat atau memperbarui (upsert) budget / anggaran pengeluaran untuk kategori tertentu. "
             "Contoh: 'Budget makan bulan ini 1 juta', 'Buat budget transport 500rb bulan ini', "
-            "'Atur budget hiburan 300rb'. Budget otomatis berulang tiap bulan sampai dihapus."
+            "'Atur budget hiburan 300rb'. Budget otomatis berulang tiap bulan sampai dihapus. "
+            "Bisa untuk kategori default maupun kategori buatan pengguna. Jika hasilnya CATEGORY_NOT_FOUND, "
+            "tawarkan membuat kategori itu dulu dengan finance_create_category."
         ),
         parameters=[
             ToolParameter(

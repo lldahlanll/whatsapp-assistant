@@ -50,6 +50,14 @@ class IFinanceRepository(ABC):
         self, owner_jid: str, name: str
     ) -> FinanceCategory | None: ...
 
+    @abstractmethod
+    async def count_category_usage(self, owner_jid: str, category_id: str) -> dict[str, int]:
+        """Jumlah transaksi & budget yang memakai kategori: {'transactions': n, 'budgets': n}."""
+        ...
+
+    @abstractmethod
+    async def delete_category(self, owner_jid: str, category_id: str) -> bool: ...
+
     # ── Transactions ──────────────────────────────────────────────────────────
 
     @abstractmethod

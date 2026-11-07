@@ -16,6 +16,7 @@ from whatsapp_platform.domain.entities.finance import (
     AccountType,
     BudgetAlert,
     BudgetProgress,
+    CategoryType,
     FinanceAccount,
     FinanceAuditEntry,
     FinanceBudget,
@@ -76,6 +77,14 @@ class CategoryNotFoundError(FinanceServiceError):
     pass
 
 
+class CategoryAlreadyExistsError(FinanceServiceError):
+    pass
+
+
+class CategoryInUseError(FinanceServiceError):
+    pass
+
+
 class BudgetNotFoundError(FinanceServiceError):
     pass
 
@@ -94,6 +103,28 @@ class ReversalTransactionError(FinanceServiceError):
 # Saldo disimpan sebagai REAL di SQLite (presisi ~15 digit). Batasi nominal & pembulatan agar tetap eksak.
 MAX_AMOUNT = Decimal("1000000000000")  # 1 triliun
 _CENTS = Decimal("0.01")
+
+# Kategori buatan user: batas jumlah per user dan panjang nama.
+MAX_CUSTOM_CATEGORIES = 50
+CATEGORY_NAME_MAX_LEN = 40
+DEFAULT_CUSTOM_CATEGORY_ICON = "🏷️"
+
+
+def _parse_category_type(value: str | CategoryType | None) -> CategoryType | None:
+    """'pengeluaran'/'expense'/'keluar' -> EXPENSE, 'pemasukan'/'income'/'masuk' -> INCOME."""
+    if value is None or isinstance(value, CategoryType):
+        return value
+    v = str(value).strip().lower()
+    if v in ("expense", "pengeluaran", "keluar", "out", "spending"):
+        return CategoryType.EXPENSE
+    if v in ("income", "pemasukan", "masuk", "in", "pendapatan"):
+        return CategoryType.INCOME
+    if not v:
+        return None
+    raise FinanceServiceError(
+        f"Tipe kategori '{value}' tidak valid. Gunakan 'pengeluaran' atau 'pemasukan'."
+    )
+
 
 # Persentase pemakaian budget yang memicu peringatan saat pertama kali terlewati.
 BUDGET_ALERT_THRESHOLDS: tuple[int, ...] = (80, 100)
@@ -290,27 +321,132 @@ class FinanceService:
 
     # ── Categories ────────────────────────────────────────────────────────────
 
+    async def _categories_of_type(
+        self, owner_jid: str, category_type: CategoryType
+    ) -> list[FinanceCategory]:
+        await self.ensure_defaults(owner_jid)
+        return [c for c in await self._repo.get_categories(owner_jid) if c.category_type == category_type]
+
+    async def create_category(
+        self,
+        owner_jid: str,
+        name: str,
+        category_type: str | CategoryType,
+        icon: str | None = None,
+    ) -> FinanceCategory:
+        """Buat kategori pemasukan/pengeluaran baru milik user."""
+        ctype = _parse_category_type(category_type)
+        if ctype is None:
+            raise FinanceServiceError("Sebutkan tipe kategori: 'pengeluaran' atau 'pemasukan'.")
+        clean = " ".join((name or "").split())
+        if len(clean) < 2:
+            raise FinanceServiceError("Nama kategori minimal 2 karakter.")
+        if len(clean) > CATEGORY_NAME_MAX_LEN:
+            raise FinanceServiceError(f"Nama kategori maksimal {CATEGORY_NAME_MAX_LEN} karakter.")
+
+        await self.ensure_defaults(owner_jid)
+        all_categories = await self._repo.get_categories(owner_jid)
+        for c in all_categories:
+            if c.category_type == ctype and c.name.lower() == clean.lower():
+                raise CategoryAlreadyExistsError(f"Kategori '{c.name}' sudah ada.")
+        if sum(1 for c in all_categories if not c.is_default) >= MAX_CUSTOM_CATEGORIES:
+            raise FinanceServiceError(
+                f"Batas {MAX_CUSTOM_CATEGORIES} kategori buatan sendiri sudah tercapai. "
+                "Hapus kategori yang tidak dipakai dulu."
+            )
+
+        icon_clean = (icon or "").strip()
+        category = await self._repo.create_category(
+            FinanceCategory(
+                id=str(uuid.uuid4()),
+                owner_jid=owner_jid,
+                name=clean,
+                category_type=ctype,
+                icon=icon_clean if 0 < len(icon_clean) <= 8 else DEFAULT_CUSTOM_CATEGORY_ICON,
+                is_default=False,
+                created_at=datetime.now(UTC),
+            )
+        )
+        logger.info("Category created", owner=owner_jid, name=clean, type=ctype.value)
+        return category
+
+    async def delete_category(
+        self,
+        owner_jid: str,
+        name: str,
+        category_type: str | CategoryType | None = None,
+    ) -> FinanceCategory:
+        """Hapus kategori buatan user. Kategori default & yang masih dipakai tidak bisa dihapus."""
+        ctype = _parse_category_type(category_type)
+        await self.ensure_defaults(owner_jid)
+        name_clean = " ".join((name or "").split()).lower()
+        matches = [
+            c for c in await self._repo.get_categories(owner_jid)
+            if c.name.lower() == name_clean and (ctype is None or c.category_type == ctype)
+        ]
+        if not matches:
+            raise CategoryNotFoundError(f"Kategori '{name}' tidak ditemukan.")
+        if len(matches) > 1:
+            raise FinanceServiceError(
+                f"Ada kategori '{matches[0].name}' untuk pemasukan dan pengeluaran. "
+                "Sebutkan tipenya (pemasukan/pengeluaran)."
+            )
+        category = matches[0]
+        if category.is_default:
+            raise FinanceServiceError(f"Kategori default '{category.name}' tidak bisa dihapus.")
+
+        usage = await self._repo.count_category_usage(owner_jid, category.id)
+        if usage["transactions"] or usage["budgets"]:
+            parts = []
+            if usage["transactions"]:
+                parts.append(f"{usage['transactions']} transaksi")
+            if usage["budgets"]:
+                parts.append(f"{usage['budgets']} budget")
+            raise CategoryInUseError(
+                f"Kategori '{category.name}' masih dipakai oleh {' dan '.join(parts)}, "
+                "jadi tidak bisa dihapus. Hapus/ubah dulu data tersebut."
+            )
+
+        await self._repo.delete_category(owner_jid, category.id)
+        logger.info("Category deleted", owner=owner_jid, name=category.name)
+        return category
+
     async def _resolve_category(
         self, owner_jid: str, category_name: str | None, tx_type: TransactionType
     ) -> FinanceCategory | None:
-        await self.ensure_defaults(owner_jid)
-
-        if category_name:
-            cat = await self._repo.find_category_by_name(owner_jid, category_name)
-            if cat:
-                return cat
-
+        if not category_name:
+            return None
+        ctype = CategoryType.EXPENSE if tx_type == TransactionType.EXPENSE else CategoryType.INCOME
+        name_clean = " ".join(category_name.split()).lower()
+        for c in await self._categories_of_type(owner_jid, ctype):
+            if c.name.lower() == name_clean:
+                return c
         return None
 
     async def _auto_category(
         self, owner_jid: str, text: str, tx_type: TransactionType
     ) -> FinanceCategory | None:
+        if not text:
+            return None
+        ctype = CategoryType.EXPENSE if tx_type == TransactionType.EXPENSE else CategoryType.INCOME
+        categories = await self._categories_of_type(owner_jid, ctype)
+        text_lower = text.lower()
+
+        # Kategori buatan user lebih spesifik dari keyword bawaan ("kopi" -> "Kopi", bukan "Makanan").
+        # Nama terpanjang dulu agar "Kopi Susu" menang atas "Kopi".
+        custom = sorted((c for c in categories if not c.is_default), key=lambda c: -len(c.name))
+        for c in custom:
+            if re.search(rf"(?<!\w){re.escape(c.name.lower())}(?!\w)", text_lower):
+                return c
+
         keyword_map = (
             EXPENSE_KEYWORD_MAP if tx_type == TransactionType.EXPENSE else INCOME_KEYWORD_MAP
         )
         guessed_name = guess_category_from_text(text, keyword_map)
         if guessed_name:
-            return await self._repo.find_category_by_name(owner_jid, guessed_name)
+            for c in categories:
+                if c.name.lower() == guessed_name.lower():
+                    return c
         return None
 
     # ── Income ────────────────────────────────────────────────────────────────
@@ -842,9 +978,9 @@ class FinanceService:
     async def resolve_expense_category(
         self, owner_jid: str, category_name: str
     ) -> FinanceCategory:
-        await self.ensure_defaults(owner_jid)
-        categories = await self._repo.get_categories(owner_jid)
-        name_clean = category_name.strip().lower()
+        # Budget hanya untuk kategori pengeluaran; jangan sampai "budget gaji" cocok ke kategori pemasukan.
+        categories = await self._categories_of_type(owner_jid, CategoryType.EXPENSE)
+        name_clean = " ".join(category_name.split()).lower()
 
         # 1. Exact match (case-insensitive)
         for c in categories:
@@ -863,7 +999,10 @@ class FinanceService:
                 if c.name.lower() == guessed.lower():
                     return c
 
-        raise CategoryNotFoundError(f"Kategori '{category_name}' tidak ditemukan.")
+        raise CategoryNotFoundError(
+            f"Kategori pengeluaran '{category_name}' belum ada. "
+            "Buat dulu kategorinya, lalu atur budget-nya."
+        )
 
     async def set_budget(
         self,

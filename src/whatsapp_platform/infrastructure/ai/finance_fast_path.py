@@ -22,6 +22,8 @@ GROUP_PRIVATE_TOOLS: set[str] = {
     "finance_delete_account",
     "finance_get_accounts",
     "finance_get_categories",
+    "finance_create_category",
+    "finance_delete_category",
     "finance_get_transaction_detail",
     "finance_update_transaction",
     "finance_delete_transaction",
@@ -489,6 +491,19 @@ def _fast_delete_transaction(data: dict) -> str | None:
     tx_id = data.get("deleted_transaction_id", "")
     msg = data.get("message", f"Transaksi {tx_id} berhasil dihapus.")
     return msg
+
+
+# finance_create_category sengaja TANPA fast-path: setelah kategori dibuat, LLM sering perlu
+# lanjut di giliran yang sama (mis. "buat kategori Kopi lalu budget 200rb").
+
+
+@_handler("finance_delete_category")
+def _fast_delete_category(data: dict) -> str | None:
+    status = str(data.get("status", "")).lower()
+    if status != "success":
+        msg = data.get("message")
+        return f"❌ *Gagal menghapus kategori*\n\n{msg}" if msg else None
+    return f"Kategori *{data.get('category', '')}* berhasil dihapus."
 
 
 @_handler("finance_delete_budget")

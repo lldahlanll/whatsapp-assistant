@@ -314,6 +314,43 @@ class SQLAlchemyFinanceRepository(IFinanceRepository):
             m = result.scalars().first()
             return _category_from_model(m) if m else None
 
+    async def count_category_usage(self, owner_jid: str, category_id: str) -> dict[str, int]:
+        async with self._session() as session:
+            tx_count = await session.scalar(
+                select(func.count()).select_from(FinanceTransactionModel).where(
+                    FinanceTransactionModel.owner_jid == owner_jid,
+                    FinanceTransactionModel.category_id == category_id,
+                )
+            )
+            budget_count = await session.scalar(
+                select(func.count()).select_from(FinanceBudgetModel).where(
+                    FinanceBudgetModel.owner_jid == owner_jid,
+                    FinanceBudgetModel.category_id == category_id,
+                )
+            )
+            return {"transactions": int(tx_count or 0), "budgets": int(budget_count or 0)}
+
+    async def delete_category(self, owner_jid: str, category_id: str) -> bool:
+        async with self._session() as session:
+            model = (
+                await session.execute(
+                    select(FinanceCategoryModel).where(
+                        FinanceCategoryModel.id == category_id,
+                        FinanceCategoryModel.owner_jid == owner_jid,
+                    )
+                )
+            ).scalar_one_or_none()
+            if not model:
+                return False
+            _add_audit(
+                session, owner_jid, "category", model.id, "delete",
+                f"Kategori {model.category_type} '{model.name}'",
+                _row_snapshot(model),
+            )
+            await session.delete(model)
+            await session.commit()
+            return True
+
     # ── Transactions ──────────────────────────────────────────────────────────
 
     async def add_transaction(self, transaction: FinanceTransaction) -> FinanceTransaction:
