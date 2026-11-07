@@ -6,6 +6,12 @@ services:
       dockerfile: Dockerfile
     container_name: whatsapp-platform
     restart: unless-stopped
+    # Batasi log stdout Docker agar disk tidak penuh. Log permanen ada di volume app_logs (logs/app.log*).
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     env_file:
       - .env.docker
     environment:

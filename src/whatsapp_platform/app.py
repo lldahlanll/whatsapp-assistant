@@ -44,7 +44,13 @@ class Application:
 
     async def start(self) -> None:
         """Start WhatsApp Platform Application."""
-        setup_logging(log_level=self.settings.log_level, app_env=self.settings.app_env)
+        setup_logging(
+            log_level=self.settings.log_level,
+            app_env=self.settings.app_env,
+            log_file_path=self.settings.log_file_path,
+            log_file_max_bytes=self.settings.log_file_max_bytes,
+            log_file_backup_count=self.settings.log_file_backup_count,
+        )
         logger.info(
             "Starting WhatsApp Platform Application",
             version=_APP_VERSION,

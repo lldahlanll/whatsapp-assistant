@@ -38,6 +38,19 @@ class Settings(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
         default="INFO", description="Log level"
     )
+    log_file_path: str = Field(
+        default="./logs/app.log",
+        description=(
+            "File log JSON berotasi (production saja). Di Docker ./logs = volume app_logs, "
+            "jadi log tetap ada setelah container dibuat ulang. Kosongkan untuk mematikan."
+        ),
+    )
+    log_file_max_bytes: int = Field(
+        default=10 * 1024 * 1024, ge=1024 * 1024, description="Ukuran satu file log sebelum dirotasi"
+    )
+    log_file_backup_count: int = Field(
+        default=10, ge=1, le=100, description="Jumlah file log lama yang disimpan (app.log.1 ... .N)"
+    )
 
     # REST API settings
     api_enabled: bool = Field(default=True, description="Enable REST API server")

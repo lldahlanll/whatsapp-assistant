@@ -117,6 +117,23 @@ docker stats whatsapp-platform
 
 ---
 
+### Log permanen
+
+`docker logs` ikut hilang setiap container dibuat ulang (setiap deploy). Salinan permanen ditulis ke volume
+`app_logs` sebagai `logs/app.log` (satu baris JSON per event, dirotasi 10 MB × 10 file, ±110 MB maksimum):
+
+```bash
+# 50 baris terakhir
+docker exec whatsapp-platform tail -n 50 /app/logs/app.log
+
+# Hanya error, termasuk file lama hasil rotasi
+docker exec whatsapp-platform sh -c 'cat /app/logs/app.log* | grep "\"level\": \"error\""'
+```
+
+Atur lewat `LOG_FILE_PATH`, `LOG_FILE_MAX_BYTES`, `LOG_FILE_BACKUP_COUNT` di `.env.docker` (kosongkan `LOG_FILE_PATH` untuk mematikan).
+
+---
+
 ## 7. Update Berikutnya (tanpa migrasi manual)
 
 Di VPS cukup jalankan:
