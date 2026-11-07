@@ -88,6 +88,14 @@ class CommandsFeature(IFeatureModule):
         finance_service = container.resolve(FinanceService)
         router.register(FinanceCommandHandler(finance_service))
 
+        if settings.scheduler_enabled:
+            from whatsapp_platform.features.commands.handlers.reminder import ReminderCommandHandler
+            from whatsapp_platform.features.scheduler.service import SchedulerService
+
+            scheduler_service = container.resolve(SchedulerService)
+            router.register(ReminderCommandHandler(scheduler_service, "pengingat"))
+            router.register(ReminderCommandHandler(scheduler_service, "reminder"))
+
         gateway.subscribe_event(MessageReceived, router.on_message_received)
 
     async def shutdown(self) -> None:

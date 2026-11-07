@@ -158,6 +158,13 @@ class Settings(BaseSettings):
     ai_memory_max_chars: int = Field(
         default=1500, description="Total karakter maksimum memori per pengguna per chat"
     )
+    scheduler_enabled: bool = Field(
+        default=True,
+        description="Pengingat & laporan terjadwal yang dikirim bot secara proaktif",
+    )
+    scheduler_poll_seconds: float = Field(
+        default=20.0, ge=5.0, le=300.0, description="Interval (detik) pengecekan jadwal jatuh tempo"
+    )
     ai_voice_enabled: bool = Field(
         default=True,
         description="Transkripsi voice note (Groq Whisper) lalu diproses seperti pesan teks",

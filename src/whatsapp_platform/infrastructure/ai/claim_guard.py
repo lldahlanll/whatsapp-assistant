@@ -29,3 +29,39 @@ def is_unbacked_finance_claim(user_text: str | None, reply: str | None) -> bool:
         return False
     return bool(_SUCCESS_CLAIM.search(reply))
 
+
+# ── Pengingat ─────────────────────────────────────────────────────────────────
+# Bot hanya bisa mengirim pengingat jika reminder_create benar-benar sukses. Tanpa itu,
+# "Pengingat diset" / "nanti aku ingatkan" adalah janji palsu: pesan tidak akan pernah terkirim.
+
+_REMINDER_CUE = re.compile(
+    r"(?i)\b(ingat\w*|inget\w*|kabari\w*|kabarin|pengingat|reminder|remind|alarm|jadwal\w*|"
+    r"\d+\s*(menit|mnt|jam)\s*lagi|(besok|nanti)\s+(pagi|siang|sore|malam|jam))\b"
+)
+
+_REMINDER_CLAIM = re.compile(
+    r"(?i)("
+    r"\b(pengingat|reminder|alarm|jadwal)\b[^.\n]{0,40}?"
+    r"\b(diset|disetel|dipasang|dibuat|tersimpan|disimpan|diaktifkan|aktif|berhasil|sudah|siap|terpasang)\b"
+    r"|\b(akan|nanti|bakal|pasti)\s+(aku|saya|ku|kami|bot)?\s*"
+    r"(ingatkan|ingetin|ingatin|kabari|kabarin|beritahu|kasih tahu)\b"
+    r"|\b(aku|saya)\s+(akan\s+)?(ingatkan|ingetin|ingatin|kabari|kabarin)\s+(kamu|kak|kakak|anda|lagi|nanti|\d)"
+    r"|\bkuingatkan\b"
+    r")"
+)
+
+UNBACKED_REMINDER_REPLY = (
+    "Maaf, pengingatnya belum tersimpan, jadi tidak akan terkirim. "
+    "Coba ulangi dengan jelas, contoh: _'ingetin makan 5 menit lagi'_, "
+    "atau pakai perintah `!pengingat 5m makan`."
+)
+
+
+def is_unbacked_reminder_claim(user_text: str | None, reply: str | None) -> bool:
+    """True bila user meminta pengingat/berwaktu dan balasan menjanjikan pengingat.
+
+    Pemanggil wajib memastikan tidak ada reminder_create yang sukses di giliran ini.
+    """
+    if not user_text or not reply:
+        return False
+    return bool(_REMINDER_CUE.search(user_text) and _REMINDER_CLAIM.search(reply))

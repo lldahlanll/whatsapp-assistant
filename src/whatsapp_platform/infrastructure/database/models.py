@@ -180,3 +180,31 @@ class FinanceAuditLogModel(Base):
     summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
     snapshot: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
+
+
+class ScheduledTaskModel(Base):
+    """Pengingat & laporan terjadwal yang dikirim bot secara proaktif."""
+
+    __tablename__ = "scheduled_tasks"
+    __table_args__ = (
+        Index("ix_scheduled_tasks_due", "is_active", "next_run_at"),
+        Index("ix_scheduled_tasks_owner", "owner_jid", "is_active"),
+        UniqueConstraint("owner_jid", "short_id", name="uq_scheduled_tasks_owner_short_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    owner_jid: Mapped[str] = mapped_column(String(100), nullable=False)
+    chat_jid: Mapped[str] = mapped_column(String(100), nullable=False)
+    short_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    # reminder | finance_report
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # once | daily | weekdays | weekly | monthly
+    recurrence: Mapped[str] = mapped_column(String(20), nullable=False)
+    next_run_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    anchor_day: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    run_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    fail_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))

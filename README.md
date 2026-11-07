@@ -33,6 +33,17 @@ Platform **WhatsApp Assistant** production-grade berbasis **Python 3.12+** dan *
 - **Natural language** — cukup ngobrol dengan AI untuk catat keuangan
 - **Command shortcut** — `!finance` untuk akses cepat
 
+### ⏰ Pengingat & Laporan Terjadwal
+- Bot mengirim pesan **proaktif** pada waktunya — cukup ngobrol: _"ingetin minum obat tiap hari jam 8"_, _"30 menit lagi ingetin angkat jemuran"_
+- Pengulangan: sekali, harian, hari kerja (Sen–Jum), mingguan, bulanan (tanggal 29–31 aman di bulan pendek)
+- **Laporan keuangan otomatis**: _"kirim laporan keuangan tiap senin jam 7"_ (chat pribadi saja)
+- Aman saat bot mati/WA putus: jadwal sekali jalan dikirim terlambat dengan keterangan, jadwal berulang yang basi (>6 jam) dilewati
+- **Command shortcut** — `!pengingat` (daftar), `!pengingat 08:00 harian minum obat`, `!pengingat hapus 2`
+- Batas 30 jadwal aktif per pengguna; nonaktifkan dengan `SCHEDULER_ENABLED=false`
+
+### 💰 Kategori Kustom Keuangan
+- Tambah kategori pemasukan/pengeluaran sendiri lalu pasang budget-nya: _"tambah kategori pengeluaran Kopi"_, `!finance kategori tambah keluar Kopi`
+
 ### 🌐 Monitoring Jaringan MikroTik
 - Monitoring kesehatan router (CPU, memory, uptime, disk)
 - Analisis traffic real-time per interface

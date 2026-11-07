@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import re
 import uuid
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -19,7 +20,12 @@ from whatsapp_platform.domain.value_objects.message_content import (
     TextContent,
 )
 from whatsapp_platform.infrastructure.ai.ai_service import AIService
-from whatsapp_platform.infrastructure.ai.claim_guard import UNBACKED_CLAIM_REPLY, is_unbacked_finance_claim
+from whatsapp_platform.infrastructure.ai.claim_guard import (
+    UNBACKED_CLAIM_REPLY,
+    UNBACKED_REMINDER_REPLY,
+    is_unbacked_finance_claim,
+    is_unbacked_reminder_claim,
+)
 from whatsapp_platform.infrastructure.ai.constants import (
     AI_IMAGE_DEFAULT_MIME_TYPE,
     AI_IMAGE_DEFAULT_PROMPT,
@@ -77,6 +83,27 @@ def _current_date_note() -> str:
         "(Asia/Jakarta time, WIB). Resolve relative dates such as 'hari ini', 'kemarin', "
         "or '3 hari lalu' from this date."
     )
+
+
+class _ToolRunRecorder:
+    """Membungkus executor untuk satu giliran: mencatat tool yang sukses dijalankan."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.succeeded: set[str] = set()
+
+    @property
+    def is_enabled(self) -> bool:
+        return bool(getattr(self._inner, "is_enabled", True))
+
+    async def execute(self, tool_name: str, *args: Any, **kwargs: Any) -> str:
+        result = await self._inner.execute(tool_name, *args, **kwargs)
+        try:
+            if json.loads(result).get("status") == "success":
+                self.succeeded.add(tool_name)
+        except (TypeError, ValueError, AttributeError):
+            pass
+        return result
 
 
 def _escape_role_spoof(text: str) -> str:
@@ -204,6 +231,7 @@ class AIReplyUseCase:
             tools_enabled=tools_available and image is None,
             is_group=is_group,
             memory_enabled=self._memory_store is not None,
+            reminders_enabled=self._settings.scheduler_enabled,
         )
 
         # 3. Fetch DB conversation history using policy.history_limit (with fallback guard)
@@ -267,11 +295,13 @@ class AIReplyUseCase:
         request_id = uuid.uuid4().hex[:12]
 
         # 4. Delegate to AIService with selected tools
+        recorder: _ToolRunRecorder | None = None
         if policy.tools and self._tool_executor:
+            recorder = _ToolRunRecorder(self._tool_executor)
             response = await self._ai_service.generate_reply_with_tools(
                 chat_jid=chat_jid_str,
                 messages=messages,
-                tool_executor=self._tool_executor,
+                tool_executor=recorder,
                 tools=policy.tools,
                 user_jid=trigger_message.sender_jid,
                 wa_chat_jid=trigger_message.chat_jid,
@@ -295,6 +325,12 @@ class AIReplyUseCase:
             if is_unbacked_finance_claim(trigger_text, response.text):
                 logger.warning("Blocked unbacked finance success claim", chat=chat_jid_str, intent=policy.intent)
                 response.text = UNBACKED_CLAIM_REPLY
+
+        # Janji "pengingat diset" tanpa reminder_create yang sukses = pesan tidak akan pernah terkirim.
+        reminder_saved = recorder is not None and "reminder_create" in recorder.succeeded
+        if not reminder_saved and is_unbacked_reminder_claim(trigger_text, response.text):
+            logger.warning("Blocked unbacked reminder claim", chat=chat_jid_str, intent=policy.intent)
+            response.text = UNBACKED_REMINDER_REPLY
 
         # 5. Persist trigger and AI reply to the context cache
         # Bytes gambar tidak disimpan ke konteks; cukup penanda teks.

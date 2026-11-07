@@ -288,6 +288,31 @@ class Container(IContainer):
         if self.settings.ai_memory_enabled:
             composite_executor.register("memory", MemoryToolExecutor(memory_store))
 
+        # Scheduler: pengingat & laporan terjadwal
+        from whatsapp_platform.features.scheduler.service import (
+            SchedulerService,
+            build_finance_report_text,
+        )
+        from whatsapp_platform.infrastructure.ai.reminder_executor import ReminderToolExecutor
+        from whatsapp_platform.infrastructure.database.repositories.schedule_repo import (
+            SQLAlchemyScheduleRepository,
+        )
+
+        async def _send_scheduled(chat_jid: str, text: str) -> None:
+            await send_msg_uc.execute(chat_jid, text)
+
+        async def _finance_report(owner_jid: str) -> str:
+            return await build_finance_report_text(finance_service, owner_jid)
+
+        scheduler_service = SchedulerService(
+            repo=SQLAlchemyScheduleRepository(session_factory),
+            send=_send_scheduled,
+            build_finance_report=_finance_report,
+        )
+        self.register(SchedulerService, scheduler_service)
+        if self.settings.scheduler_enabled:
+            composite_executor.register("reminder", ReminderToolExecutor(scheduler_service))
+
         self.register(CompositeToolExecutor, composite_executor)
 
         ai_reply_uc = AIReplyUseCase(

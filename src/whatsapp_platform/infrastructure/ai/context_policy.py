@@ -14,6 +14,7 @@ from whatsapp_platform.infrastructure.ai.constants import (
     IntentType,
 )
 from whatsapp_platform.infrastructure.ai.memory_tools import MEMORY_TOOLS, wants_memory_tools
+from whatsapp_platform.infrastructure.ai.reminder_tools import REMINDER_TOOLS, wants_reminder_tools
 from whatsapp_platform.infrastructure.ai.tool_policy import select_tools
 
 if TYPE_CHECKING:
@@ -43,6 +44,7 @@ class ContextPolicyManager:
         tools_enabled: bool = True,
         is_group: bool = False,
         memory_enabled: bool = False,
+        reminders_enabled: bool = False,
     ) -> ContextPolicy:
         """Menentukan instruksi, jumlah riwayat pesan, dan alat yang dibutuhkan AI."""
         # Permintaan "ingat/lupakan" di obrolan biasa butuh tool → pakai intent "memory"
@@ -50,6 +52,11 @@ class ContextPolicyManager:
         wants_memory = memory_enabled and tools_enabled and wants_memory_tools(text)
         if wants_memory and intent in ("simple_chat", "chat"):
             intent = "memory"
+        # "ingetin bayar listrik tiap tgl 5" juga terdeteksi sebagai finance (kata "bayar").
+        # Pengingat diutamakan: prompt umum + hanya tool pengingat, agar tidak tercatat sebagai pengeluaran.
+        wants_reminder = reminders_enabled and tools_enabled and wants_reminder_tools(text)
+        if wants_reminder:
+            intent = "memory"  # intent obrolan yang memakai model ber-tool calling
 
         # Determine history limit from env settings
         if intent == "simple_chat":
@@ -81,6 +88,8 @@ class ContextPolicyManager:
         tools = select_tools(intent, text) if tools_enabled else None
         if wants_memory:
             tools = [*(tools or []), *MEMORY_TOOLS]
+        if wants_reminder:
+            tools = [*(tools or []), *REMINDER_TOOLS]
 
         return ContextPolicy(
             intent=intent,
